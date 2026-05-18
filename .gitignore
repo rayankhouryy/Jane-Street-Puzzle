@@ -1,0 +1,15 @@
+# Model weights (download via scripts; too large for git)
+*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
