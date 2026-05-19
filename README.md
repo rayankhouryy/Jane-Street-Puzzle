@@ -544,7 +544,7 @@ PyTorch Sequential
 | 1 | NeuroDecomp scaffolding | ✅ `neurodecomp/` |
 | MVP-1 | Sparse Graph + Domain Profiler | ✅ `scripts/run_profile.py` |
 | MVP-2 | Tail Decompiler (AND-of-deltas → predicate list) | ✅ `scripts/run_tail.py` |
-| MVP-3 | Head Decompiler | ⏳ |
+| MVP-3 | Head Decompiler (abstract interpretation) | ✅ `scripts/run_head.py` |
 | MVP-4 | One-iteration Body Decompiler | ⏳ |
 | MVP-5 | Full loop folding & codegen | ⏳ |
 | MVP-6 | Z3-backed motif library | ⏳ |
@@ -595,6 +595,9 @@ python scripts/run_profile.py model_3_11.pt
 
 # Tail decompilation (MVP-2) -- recovers the 16-byte target value
 python scripts/run_tail.py model_3_11.pt
+
+# Head decompilation (MVP-3) -- abstract interp, recovers initial constants
+python scripts/run_head.py model_3_11.pt
 ```
 
 ---
@@ -611,6 +614,15 @@ python scripts/run_tail.py model_3_11.pt
   binary-to-integer mapping?  → `scripts/run_tail.py` recovers the
   16-byte target ``c7ef65233c40aa32c2b9ace37595fa7c`` and the bit-address
   vector for each byte.
+- [x] Decode the head: recover the initial constants stamped into the
+  working state.  → `scripts/run_head.py` runs abstract interpretation
+  over bytes ∈ [0,255]^55 and emits the head's 336 output neurons
+  with role tags.  On the benchmark model it independently recovers
+  the four 32-bit constants
+  ``A = 0x67452301``, ``B = 0xefcdab89``, ``C = 0x98badcfe``,
+  ``D = 0x10325476``, plus the precomputed ``B & C = 0x88888888`` and
+  ``~B = 0x10325476`` and the first round constant ``0xd76aa478``,
+  packed as little-endian bytes in the head's working state.
 - [ ] Decode one representative body block $B$. Express it as a Python
   function $B(\text{state}, K_t, s_t) \to \text{state}$ where $K_t, s_t$
   are the per-iteration constants extracted from position 28 (and other
