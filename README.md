@@ -621,7 +621,7 @@ confirms `model("bitter lesson") = 1`.
 | MVP-9a | Per-output-bit truth-table decoder | ✅ `scripts/run_round_decode.py` |
 | MVP-9b | Round-function building-block detection (per iteration) | ✅ `scripts/run_round_classify.py` |
 | MVP-9c | Register-bit probe for clean F/G/H/I (synthetic only) | 🟡 partial |
-| MVP-9d | Register inference (A/B/C/D location in 288-dim state) | ⏳ |
+| MVP-9d | Register inference (A/B/C/D location in state) | ✅ `scripts/run_register_inference.py` |
 | MVP-10 | Padding scheme decode | ✅ `scripts/run_padding.py` (partial) |
 | MVP-8 | Per-iteration K constants (as residuals after MVP-9) | ⏳ |
 
@@ -695,6 +695,9 @@ python scripts/run_round_classify.py model_3_11.pt --iterations 0,16,32,48,62
 
 # Padding scheme decode (MVP-10) -- classify head outputs by role
 python scripts/run_padding.py model_3_11.pt
+
+# Register inference (MVP-9d) -- find A/B/C/D positions in state
+python scripts/run_register_inference.py model_3_11.pt
 ```
 
 ---
@@ -812,10 +815,19 @@ python scripts/run_padding.py model_3_11.pt
   blocked on the real model because the iteration's input state
   contains non-zero baseline values (IV, K, M) that must be matched —
   i.e. it needs **register inference (MVP-9d)** as a prerequisite.
-- [ ] **MVP-9d.** Register inference: identify which 32-bit windows of
-  the 288-dim inter-iteration state hold registers A, B, C, D and
-  which hold the message word M and round constant K.  Likely via
-  bit-correlation patterns in the body's first layers.
+- [x] **MVP-9d — register inference.** Observe per-position state
+  changes across iterations to identify the 32-bit windows that hold the
+  active registers.  → `scripts/run_register_inference.py` recovers
+  exactly **four 32-bit register windows at positions [0,32),
+  [32,64), [64,96), [96,128)** (the MD5 A/B/C/D state) on the benchmark
+  model, plus a quasi-stable window at [320,352) that's the candidate
+  per-round constant K_i storage.  The per-iteration "active
+  register" pattern cycles through A→D→C→B in the expected MD5
+  rotation order.
+- [ ] **MVP-9e.** Now that we know which input bits are A, B, C, D,
+  re-run MVP-9c's register-bit probe with realistic baselines for the
+  non-active inputs — this should expose the pure 3-input round
+  function and confirm F/G/H/I per iteration.
 - [x] **MVP-10 (initial padding decode).** Probe the head with diverse
   varying-length inputs and classify each of the 336 outputs as
   ``const`` / ``passthrough(byte_i, bit_k)`` / ``length_bit(k)`` /

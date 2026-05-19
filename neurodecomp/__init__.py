@@ -31,7 +31,7 @@ __version__ = "0.1.0"
 
 from . import (
     block_finder, body, certify, emit, head, interp, model_loader, motifs,
-    padding, round_decode, sparse_graph, tail,
+    padding, registers, round_decode, sparse_graph, tail,
 )
 from .block_finder import find_blocks
 from .body import decompile_body
@@ -41,6 +41,7 @@ from .head import decompile_head
 from .model_loader import load_model, recover_tokenizer
 from .motifs import scan_model as scan_motifs, verify_all as verify_motifs
 from .padding import decode_padding
+from .registers import infer_registers
 from .round_decode import decode_iteration
 from .sparse_graph import extract_ssa
 from .tail import decompile_tail
@@ -55,6 +56,7 @@ __all__ = [
     "decompile_body",
     "decode_iteration",
     "decode_padding",
+    "infer_registers",
     "scan_motifs",
     "verify_motifs",
     "certify_motifs",
@@ -68,6 +70,7 @@ __all__ = [
     "model_loader",
     "motifs",
     "padding",
+    "registers",
     "round_decode",
     "sparse_graph",
     "tail",
