@@ -4,21 +4,16 @@
 > networks.**
 
 Some neural networks aren't really neural networks. When their weights live in
-$\{0, \pm 1, \pm 2, \pm 4, \dots\}$ and 99% of them are zero, they were
+$\{0, \pm 1, \pm 2, \pm 4, \dots\}$ and 99 % of them are zero, they were
 **hand-compiled**: someone wrote an algorithm by hand and arranged a
 `Linear → ReLU → Linear → ReLU → …` stack to evaluate it. NeuroDecomp is a
 tool that, given such a network, recovers the underlying algorithm as
 readable Python — without being told what algorithm to look for.
 
 The validation target for this repo is the [Jane Street March 2025 puzzle][js-puzzle]:
-a 1.16 GB PyTorch model that takes a string and returns 0 or 1.
-The puzzle ships only the weights. **Our job is to make NeuroDecomp tell us
-what the model computes, with no human in the loop.**
-
-> **Spoiler warning.** The puzzle has been solved publicly. To keep the
-> decompiler honest we keep the known answer in [`docs/99_spoilers.md`](docs/99_spoilers.md)
-> and use it only for after-the-fact validation. The README and design docs
-> reason only from observable facts about the weights.
+a 1.16 GB PyTorch model that takes a string and returns 0 or 1. The puzzle
+ships only the weights. **Our job is to make NeuroDecomp tell us what the
+model computes, with no human in the loop.**
 
 [js-puzzle]: https://huggingface.co/spaces/jane-street/puzzle
 
@@ -40,192 +35,489 @@ NeuroDecomp asks *"what program did this network secretly compile?"*
 
 ---
 
-## 2. The benchmark target
+## 2. Methodology
 
-The model presents the following type and structure to a fresh observer.
+We borrow techniques from three traditions:
 
-### 2.1 Container and signature
-
-- `torch.nn.modules.container.Sequential`.
-- 5442 children, strictly alternating: 2721 `Linear` + 2721 `ReLU`.
-- First `Linear`: `in_features = 55`. Last `Linear`: `out_features = 1`.
-- Custom `_call_impl` attached via cloudpickle so `model("string")` works
-  directly. Disassembling the bytecode (`scripts/05_extract_tokenizer.py`)
-  yields
-
-  ```python
-  _call_impl = lambda x: model.forward(
-      torch.Tensor(list(map(ord, str(x)[:55].ljust(55, '\x00'))))
-  )
-  ```
-
-  so the input is the ASCII byte values of the first 55 characters,
-  null-padded:
-
-  $$x_i = \mathrm{ord}(s_i), \qquad i = 0, \dots, 54.$$
-
-- Effective type:
-
-  $$f : \Sigma^{\le 55} \;\longrightarrow\; \{0, 1\}, \qquad \Sigma = \{0, \dots, 255\}.$$
-
-  Output is non-negative (final activation is `ReLU`) and behaves like a 0/1
-  indicator on random ASCII inputs.
-
-### 2.2 Sparsity and weight alphabet
-
-- 99.6% of `Linear.weight` entries are exactly zero.
-- The set of distinct nonzero values is small and integer-valued (powers of 2
-  plus small integers, $\{0, \pm 1, \pm 2, \pm 4, \dots, \pm 256\}$).
-- $\Rightarrow$ **the network was not trained; it is a hand-compiled circuit.**
-
-### 2.3 Macro structure: head / body / tail
-
-Let $d_i$ denote the output width of the $i$-th `Linear` and $d_0 = 55$ the
-input width. Best-matching period of the width sequence:
-
-$$
-p^\star = 42, \qquad \text{match ratio } = 0.97.
-$$
-
-The longest contiguous range that obeys that period gives the loop body:
-
-| Region | Linear indices | Layers | Width signature |
-|---|---|---|---|
-| **Head** | $L_1 \ldots L_{18}$         | 18   | $55 \to 224 \to 232 \to 64 \to \ldots \to 336$ |
-| **Body** | $L_{19} \ldots L_{m}$       | $42 N$ | 42-layer block, $N$ iterations |
-| **Tail** | $L_{m+1} \ldots L_{2721}$   | rest | $\ldots \to 192 \to 48 \to 1$ |
-
-So the network factorises as
-
-$$f \;=\; \mathrm{Tail}\;\circ\;\underbrace{B \circ B \circ \cdots \circ B}_{N \text{ times}}\;\circ\;\mathrm{Head}.$$
-
-### 2.4 Bit-mask fingerprint inside the body
-
-The recurring widths $\{304, 312, 316, 318, 319\}$ satisfy
-
-$$\{304, 312, 316, 318, 319\} \;=\; \{320 - 2^k\}_{k=0,1,2,3,4}.$$
-
-A direct fingerprint of bit-level extraction inside a 32-bit word lane.
-"Working width" $288 = 256 + 32$ — consistent with 32 bytes of state plus
-32 control bits, or alternatively $8\cdot 32 + 32$ = "32-bit word lanes plus
-status bits".
-
-### 2.5 Weight tying
-
-For each in-block position $p \in \{0, \dots, 41\}$, with iterations
-$t = 1, \dots, N$, define the per-position dispersion
-
-$$
-\rho_p \;=\; \frac{1}{\|\bar W^{(p)}\|_F} \cdot \frac{1}{N} \sum_{t=1}^{N}
-\big\|\, W^{(p)}_t - \bar W^{(p)}\,\big\|_F,
-\qquad \bar W^{(p)} = \frac{1}{N}\sum_t W^{(p)}_t.
-$$
-
-Empirically, $\rho_p = 0$ for 40 of 42 positions — those matrices are
-**bit-identical** across iterations. Only two positions vary: one carries
-per-iteration deltas, the other is a stitching layer with a shape change.
-
-**The body is a true weight-tied unrolled loop.** Modulo per-iteration
-constants, all $N$ iterations apply the same function $B$.
-
-### 2.6 The head's first layer
-
-SVD of $W_1 \in \mathbb{R}^{224 \times 55}$ gives $W_1 = U \Sigma V^{\!\top}$
-with
-
-$$\sigma_1 = \sigma_2 = \cdots = \sigma_{55} = \sqrt{3}, \qquad V = I_{55}.$$
-
-Equivalently, $W_1 \in \{0, 1\}^{224 \times 55}$ with **exactly 3 ones per
-input column**, and the 55 input dims are mutually orthogonal. The bias
-$b_1 \in \mathbb{R}^{224}$ contains the integers $1, 2, \dots, 55$ (one entry
-each) plus 56 entries of $-1$ and 113 entries of $0$ — i.e. the head is
-laying the input onto a positional strip indexed by byte position.
-
-### 2.7 The output layer (decoded analytically)
-
-The final `Linear(48 \to 1)` has explicit weights
-
-$$W_{2721} = \big(\underbrace{+1,\dots,+1}_{16},\;\underbrace{-2,\dots,-2}_{16},\;\underbrace{+1,\dots,+1}_{16}\big), \qquad b_{2721} = -15.$$
-
-Letting $y = (a, b, c)$ partition the 48 inputs into three 16-tuples,
-
-$$f(x) \;=\; \mathrm{ReLU}\!\Big(\textstyle\sum_{i=1}^{16}(a_i - 2 b_i + c_i)\; -\; 15\Big).$$
-
-The motif
-
-$$\delta(z) := \mathrm{ReLU}(z+1) + \mathrm{ReLU}(z-1) - 2\,\mathrm{ReLU}(z)
-\;=\; \mathbb{1}[z = 0] \quad \text{for } z \in \mathbb{Z}$$
-
-is the **integer Kronecker delta** — three ReLUs that detect $z = 0$. So
-each triple $(a_i, b_i, c_i)$ is exactly a Kronecker delta on some integer
-expression, and the final layer reduces to
-
-$$f(x) \;=\; \bigwedge_{i=1}^{16} \mathbb{1}\big[\text{some integer predicate}_i(x)\big].$$
-
-The network's job is therefore to compute 16 integers from the 55-byte input
-and check that all 16 equal fixed targets. The penultimate `Linear(192 \to 48)`
-has weight magnitudes that are powers of 2 with $\|W_{2720}\|_F \approx 1774$
-— a binary-to-integer decoder for an internal $128$-bit register.
+1. **Architectural-motif analysis** (ResNet / Inception). Identify repeating
+   sub-structures so we can collapse a $K$-layer net to "1 motif × $N$
+   iterations".
+2. **Mechanistic interpretability** (Olah, Anthropic).
+   - For any input $x$, a ReLU MLP is a piecewise-linear function; locally
+     it is a single affine map $J(x)\,x + c(x)$ where $J(x)$ is the
+     input–output Jacobian on the active linear region.
+   - SVD of an individual layer matrix reveals the *natural basis* used by
+     that layer: $W = U\Sigma V^{\!\top}$, with right singular vectors $V$
+     telling us which input directions matter.
+3. **Decompilation / circuit reading** (program synthesis tradition). If
+   weights take values from a tiny set such as $\{0, \pm 1, \pm 2, \dots\}$
+   or powers of 2, the layer is almost certainly a hand-written
+   boolean/arithmetic circuit, not a trained net. Read it like an opcode.
 
 ---
 
-## 3. Approach
+## 3. The benchmark target
+
+### 3.1 Container and signature
+
+- `torch.nn.modules.container.Sequential`.
+- 5442 children, strictly alternating: **2721 `Linear`** + **2721 `ReLU`**.
+- First `Linear`: `in_features = 55`. Last `Linear`: `out_features = 1`.
+- Formally, the network is
+
+  $$
+  f(x) \;=\; (L_{2721} \circ \sigma \circ L_{2720} \circ \sigma \circ \cdots \circ L_2 \circ \sigma \circ L_1)(x),
+  $$
+
+  where each $L_i$ is an affine map $L_i(h) = W_i h + b_i$ and $\sigma$ is
+  the elementwise ReLU $\sigma(z) = \max(0, z)$.
+- Range is non-negative because the final activation is a `ReLU`.
+
+### 3.2 Hidden tokenizer
+
+The Space's `app.py` calls `model("some string")` directly. The model
+instance carries a custom callable attached via cloudpickle. Recovering it
+from the pickle (`scripts/05_extract_tokenizer.py`) gives:
+
+```python
+_call_impl = lambda x: model.forward(
+    torch.Tensor(list(map(ord, str(x)[:55].ljust(55, '\x00'))))
+)
+```
+
+So the input is the ASCII byte values of the first 55 characters of the
+string, null-padded:
+
+$$
+x_i \;=\; \mathrm{ord}(s_i), \qquad i = 0, \dots, 54.
+$$
+
+The effective type of the model is therefore
+
+$$
+f : \Sigma^{\le 55} \;\longrightarrow\; \{0, 1\}, \qquad \Sigma = \{0, \dots, 255\}.
+$$
+
+The output behaves like a 0/1 indicator on random ASCII inputs.
+
+### 3.3 Sparsity and weight alphabet
+
+Across all 2721 `Linear` layers:
+
+| | |
+|---|---|
+| total weights | 288,122,268 |
+| zero weights  | 287,047,559  (**99.6 %**) |
+| weight alphabet (truncated) | $\{-1, 0, 1, 2, \dots, 30\}$ — full alphabet is small integers plus $\pm$ powers of 2 |
+
+$\Rightarrow$ **the network was not trained; it is a hand-compiled circuit.**
+
+---
+
+## 4. Architecture decomposition
+
+Let $d_i$ denote the output width of $L_i$ and $d_0 = 55$ the input width.
+
+### 4.1 Macro structure
+
+A period detector minimising $\sum_i \mathbb{1}[d_i \ne d_{i+p}]$ over
+$p \in [2, 200]$ finds
+
+$$
+p^{\star} = 42, \qquad \text{match ratio } = 0.97.
+$$
+
+Augmenting period detection with "block-start" markers (a `Linear` whose
+$(d_\text{in}, d_\text{out})$ pair appears repeatedly and reduces width)
+gives the head/body/tail decomposition:
+
+| Region | Linear indices | Size | Width pattern |
+|---|---|---|---|
+| **Head** | $L_1 \ldots L_{18}$         | 18 layers   | $55 \to 224 \to 232 \to 64 \to \ldots \to 336$ |
+| **Body** | $L_{19} \ldots L_{2664}$    | 2646 layers | 42-layer block repeated **63×** |
+| **Tail** | $L_{2665} \ldots L_{2721}$  | 57 layers   | $\ldots \to 192 \to 48 \to 1$ |
+
+So the network factorises as
+
+$$
+f \;=\; \mathrm{Tail} \;\circ\; \underbrace{B \circ B \circ \cdots \circ B}_{63 \text{ times}} \;\circ\; \mathrm{Head}.
+$$
+
+### 4.2 The 42-layer body $B$
+
+One period of width transitions decomposes into three sub-phases:
+
+$$
+\underbrace{336 \to 296 \to 340 \to \ldots \to 352 \to 288}_{\text{WIDE (15 layers)}} \;\to\;
+\underbrace{288 \to 256 \to 319 \to 288 \to 318 \to \ldots \to 256}_{\text{INNER}_1\text{ (13 layers)}} \;\to\;
+\underbrace{288 \to 256 \to 319 \to \ldots \to 336}_{\text{INNER}_2\text{ (14 layers)}}.
+$$
+
+The WIDE phase mixes the working state through a wider scratch space; the
+two INNER phases share an almost identical width pattern, suggesting a
+repeated sub-operation per outer iteration.
+
+### 4.3 Bit-mask fingerprint
+
+The recurring widths inside the INNER phases satisfy
+
+$$
+\{304, 312, 316, 318, 319\} \;=\; \{320 - 2^k\}_{k=0,1,2,3,4}.
+$$
+
+This is the canonical signature of **bit-level extraction inside a 32-bit
+word**: width $320$ holds a 32-bit register's lanes, and dropping $2^k$ from
+that width corresponds to masking out bit $k$. The body reads / writes
+individual bits of a 32-bit word, five bits in a row inside each INNER
+phase.
+
+### 4.4 State decomposition candidates
+
+The "working width" inside the body is $288 = 256 + 32$. The structurally
+plausible readings are:
+
+- **Turing-machine flavour**: a 256-cell binary tape plus a 32-position
+  one-hot head pointer.
+- **Register-file flavour**: $32 \times 8 = 256$ data bits plus 32 control
+  bits — i.e., 8 bytes of state plus a 32-bit status word.
+- **Word-lane flavour**: $288 = 9 \times 32$, i.e. nine 32-bit lanes —
+  consistent with the bit-mask fingerprint in §4.3 (32-bit word
+  manipulation).
+
+Combined with the period-42 unrolled loop, the most parsimonious
+description so far is: *a weight-tied iterative compression function that
+mutates a 288-bit state and is run 63 times*.
+
+### 4.5 Weight tying: the loop is real
+
+For each in-block position $p \in \{0, 1, \dots, 41\}$, with iterations
+$t = 1, \dots, 63$, let
+
+$$
+W^{(p)}_t \;=\; \text{weight matrix of the } p\text{-th Linear in iteration } t,
+$$
+
+and define the relative dispersion across iterations
+
+$$
+\rho_p \;=\; \frac{1}{\|\bar W^{(p)}\|_F}\;\cdot\;\frac{1}{63}\sum_{t=1}^{63}
+\big\| W^{(p)}_t - \bar W^{(p)} \big\|_F,
+\qquad \bar W^{(p)} = \frac{1}{63} \sum_t W^{(p)}_t.
+$$
+
+| Position $p$ | $\rho_p$ | Interpretation |
+|---|---|---|
+| $0, 1, 41$ | shape mismatch | boundary stitching between consecutive iterations |
+| $2 \le p \le 40$, $p \ne 28$ | $\rho_p = 0$ (bit-exact) | identical across all 63 iterations |
+| $p = 28$ | $\rho_p \approx 1.19$ with per-element std $0.015$ | a small number of iterations differ from the rest — almost certainly the slot that carries a per-iteration constant |
+
+**Conclusion.** 38/42 of the body's weight matrices are *literally
+identical* across all 63 iterations. The network is an explicit unrolling
+of a recurrent program
+
+$$
+B(h)\; = \;B(h;\, W, b) \qquad \text{(same parameters every step)}.
+$$
+
+This is not something gradient descent produces; the only sensible
+explanation is **hand-compilation**.
+
+---
+
+## 5. The head ($L_1$)
+
+### 5.1 SVD
+
+For $W_1 \in \mathbb{R}^{224 \times 55}$ we compute $W_1 = U \Sigma V^{\!\top}$
+and find
+
+$$
+\sigma_1 = \sigma_2 = \cdots = \sigma_{55} \;=\; \sqrt{3},
+\qquad V \;=\; I_{55}.
+$$
+
+Every singular value is identical and equal to $\sqrt 3$, and the right
+singular vectors are the standard basis of $\mathbb{R}^{55}$. Consequences:
+
+- The 55 input coordinates are **mutually orthogonal and equally weighted**
+  as far as $L_1$ is concerned.
+- Each column $W_{1,\,:,\,j}$ has $\|W_{1,\,:,\,j}\|_2 = \sqrt 3$.
+
+### 5.2 Direct inspection of $W_1$ and $b_1$
+
+- $W_1 \in \{0, 1\}^{224 \times 55}$. Of the $224 \times 55 = 12{,}320$
+  entries, exactly **165 are 1** and **12,155 are 0**.
+- **Each column has exactly 3 ones.** (Confirming $\|W_{1,\,:,\,j}\|^2 = 3$
+  ↔ matching the SVD.)
+- All 55 columns are distinct — no two input bytes share the same
+  fingerprint in the head.
+- Bias $b_1 \in \mathbb{R}^{224}$ has only 57 distinct values:
+
+  | Value | Count |
+  |---|---|
+  | $-1$ | 56 |
+  | $0$  | 113 |
+  | $1, 2, 3, \dots, 55$ | one entry each |
+
+> The bias contains exactly the integers $\{1, 2, \dots, 55\}$ — one per
+> input byte position. This is a hand-rolled enumeration: the head is
+> laying out the input on a "1-indexed strip" of 55 byte positions,
+> presumably so the body can iterate over byte indices later (e.g. to
+> count the input length, or pick a particular byte position by
+> comparison).
+
+### 5.3 Forward probes
+
+- $f(\mathbf 0) = 0$ and $f(\mathbf 1) = 0$.
+- $f(e_j) = 0$ for every standard basis vector $e_j$, $j = 1, \dots, 55$.
+- $f(e_j + e_k) = 0$ for 50 random pairs $(j, k)$.
+- 50,000 random ASCII strings of varying length: **all** give $f = 0$.
+- Gradient ascent on a continuous relaxation $x \in [0, 127]^{55}$ from
+  multiple random restarts converges to the all-zero pre-ReLU output and
+  fails to escape.
+
+So $f$ is **strongly zero**: the final ReLU absorbs almost every input.
+Finding inputs with $f(x) > 0$ requires either symbolic reasoning (the
+decompiler's job) or knowing the algorithm in advance.
+
+---
+
+## 6. The output layer and tail (last 57 layers)
+
+### 6.1 Final Linear $L_{2721}$
+
+$L_{2721} : \mathbb{R}^{48} \to \mathbb{R}$ has the explicit weights
+
+$$
+W_{2721} \;=\; \big(\underbrace{+1,\dots,+1}_{16},\;\underbrace{-2,\dots,-2}_{16},\;\underbrace{+1,\dots,+1}_{16}\big),
+\qquad b_{2721} = -15.
+$$
+
+Partitioning the 48-dim input as $y = (a, b, c)$ with each component in
+$\mathbb{R}^{16}$,
+
+$$
+f(x) \;=\; \mathrm{ReLU}\!\Big(\mathbf{1}^{\!\top} a - 2\,\mathbf{1}^{\!\top} b + \mathbf{1}^{\!\top} c - 15\Big)
+\;=\; \mathrm{ReLU}\!\big(S_1 - 2 S_2 + S_3 - 15\big),
+$$
+
+where $S_k = \sum_i y_i^{(k)}$.
+
+### 6.2 The Kronecker-delta identity
+
+For any integer $z \in \mathbb{Z}$, the three-ReLU motif
+
+$$
+\delta(z) \;:=\; \mathrm{ReLU}(z + 1) + \mathrm{ReLU}(z - 1) - 2\,\mathrm{ReLU}(z)
+\;=\; \mathbb{1}[z = 0]
+$$
+
+is exactly the integer-supported Kronecker delta (proof: case analysis on
+$z \in \{<-1, -1, 0, 1, >1\}$). Each triple $(a_i, b_i, c_i)$ in §6.1 is
+this motif applied to some integer expression — i.e. **each triple fires
+exactly when one integer predicate holds**.
+
+Therefore
+
+$$
+f(x) \;=\; \mathrm{ReLU}\!\Big(\textstyle\sum_{i=1}^{16}\delta_i(x) - 15\Big)
+\;=\; \bigwedge_{i=1}^{16} \delta_i(x)
+\;=\; \bigwedge_{i=1}^{16} \mathbb{1}[\text{integer predicate}_i \text{ holds}].
+$$
+
+The model's output is the **AND of 16 integer-equality predicates**. What
+each predicate compares we will discover by walking backward through the
+tail.
+
+### 6.3 Penultimate Linear $L_{2720}$
+
+$L_{2720} : \mathbb{R}^{192} \to \mathbb{R}^{48}$ has
+
+$$
+\|W_{2720}\|_F \;\approx\; 1774, \qquad
+\min W = -256, \qquad
+\max W = +128.
+$$
+
+The weight magnitudes are exact powers of two: $\{0, \pm 1, \pm 2, \pm 4,
+\pm 8, \pm 16, \pm 32, \pm 64, \pm 128, \pm 256\}$ — the **hallmark of a
+binary-to-integer decoder**. The 192 inputs are best read as a stack of
+binary signals (24 bytes' worth), and the 48 outputs are 48 weighted
+integer accumulators of those bits.
+
+In particular: $\log_2(256) = 8$ matches the byte-width of an integer
+register. So $L_{2720}$ is decoding bit lanes into integer-valued bytes,
+and $L_{2721}$ is comparing **16 bytes** against fixed targets.
+
+### 6.4 Tail outline
+
+Reading widths from $L_{2665}$ to $L_{2721}$, the tail breaks into
+recognisable sub-blocks:
+
+```
+256 → 287 → 319 → 318 → 316 → 312 → 304 → 256       (one more WIDE-style
+                                                      compression of the
+                                                      288-dim body state
+                                                      down to 256)
+256 → 192 → 192 → 160 → 223 → 192 → 222 → 192 → 220
+       → 192 → 216 → 192 → 208 → 192 → 160           (mini-decoder pass A:
+                                                      192 ↔ 160/208/.../223)
+160 → 192 → 192 → 160 → 223 → 192 → ... → 160        (mini-decoder pass B,
+                                                      same shape)
+160 → 320 → 320 → 382 → 446 → 444 → ...              (re-expansion to a
+       → 416 → 416 → 320 → 192 → 48 → 1              48-input comparator)
+```
+
+Two near-identical "mini-decoder" passes immediately precede the comparator,
+strongly suggesting a **two-stage operation**: (i) extract bits from the
+working state into bytes; (ii) re-expand those bytes into the 48-input
+shape needed by $L_{2721}$.
+
+### 6.5 Output bounds
+
+If the 48 features emerging from the tail's last `ReLU` lie in $[0, 1]$
+(plausible since they come through a long ReLU chain),
+
+$$
+f(x) \in \big[\max(0,\; -2 \cdot 16 - 15),\;\; \max(0,\; 16 + 16 - 15)\big]
+\;=\; [0,\; 17].
+$$
+
+If instead the 16 deltas are exact $\{0, 1\}$ booleans, then $S_1 + S_3 -
+2 S_2 \in \{-32, -31, \dots, 16\}$ and the bias $-15$ pushes the ReLU's
+threshold to "all 16 deltas equal 1":
+
+$$
+f(x) \;=\;
+\begin{cases}
+1 & \text{if all 16 predicates hold} \\
+0 & \text{otherwise}.
+\end{cases}
+$$
+
+This matches §6.2's algebraic derivation and the empirical $f \in \{0, 1\}$
+observation.
+
+---
+
+## 7. Working summary (no algorithm identification)
+
+From §3–§6, purely from weights:
+
+1. The model is a hand-compiled, sparse, integer-domain ReLU circuit
+   ($\rho_p = 0$ for 38/42 body positions; 99.6 % sparsity; weights ∈
+   $\{0, \pm 1, \pm 2, \pm 4, \dots, \pm 256\}$).
+2. The input is interpreted as **55 ASCII bytes** (`ord(s[:55].ljust(55, '\x00'))`).
+3. The body $B$ is a **weight-tied iterative compression**: an unrolled
+   loop of 63 iterations, each manipulating a 288-bit working state with
+   bit-level operations on 32-bit word lanes (bit-mask fingerprint, §4.3).
+4. The tail extracts **16 bytes** from the final 288-bit state and ANDs
+   together 16 integer-equality predicates against fixed targets
+   (Kronecker-delta proof, §6.2; powers-of-two decoder, §6.3).
+5. The output is exactly
+
+   $$
+   f(s) \;=\; \mathbb{1}\big[\,\mathcal{H}(s) = t\,\big]
+   $$
+
+   where $\mathcal{H} : \Sigma^{\le 55} \to \{0, 1\}^{128}$ is some
+   hand-compiled 128-bit compression function with 63 unrolled rounds and
+   $t \in \{0, 1\}^{128}$ is a fixed 16-byte target encoded in
+   $L_{2720}, L_{2721}$.
+
+We have not yet identified $\mathcal{H}$ — that's the decompiler's
+remaining job. Candidates that match the structural signature include
+MD5-family hashes (64 rounds, 128-bit state, 32-bit lanes), Murmur-family
+hashes, custom finalists, etc. Distinguishing them requires recovering
+the per-iteration constants and the round function $B$.
+
+---
+
+## 8. Approach (the decompiler)
 
 Hand-compiled networks satisfy strong structural properties:
 
-- **Sparse + small alphabet** (§2.2) → enumerable weight values.
-- **Discrete activations.** Integers, bytes, 0/1 bits, or 32-bit word lanes
-  (§2.4).
-- **Recognisable algebraic identities.** Examples we look for generically:
+- **Sparse + small alphabet** (§3.3) → enumerable weight values.
+- **Discrete activations.** Integers, bytes, 0/1 bits, or 32-bit word
+  lanes (§4.3).
+- **Recognisable algebraic identities.** Examples we look for
+  generically:
 
-  $$\mathbb{1}[x = 0] \;=\; \mathrm{ReLU}(x+1) + \mathrm{ReLU}(x-1) - 2\,\mathrm{ReLU}(x) \qquad (\text{Kronecker } \delta)$$
+  $$
+  \mathbb{1}[x = 0] \;=\; \mathrm{ReLU}(x+1) + \mathrm{ReLU}(x-1) - 2\,\mathrm{ReLU}(x) \qquad (\text{Kronecker }\delta)
+  $$
 
-  $$\mathrm{ReLU}(x - k) \;=\; \max(0, x - k) \qquad (\text{thermometer step})$$
+  $$
+  \mathbb{1}[x = c] \;=\; \delta(x - c)
+  $$
 
-  $$a \oplus b \;=\; a + b - 2\,\mathrm{ReLU}(a + b - 1) \qquad \text{for } a, b \in \{0, 1\}$$
+  $$
+  \mathrm{ReLU}(x - k) \;=\; \max(0,\, x - k) \qquad (\text{thermometer step})
+  $$
 
-  $$\mathrm{ROTL}_s(x) \;=\; ((x \ll s) \;|\; (x \gg (32-s))) \bmod 2^{32}$$
+  $$
+  a \;\mathrm{AND}\; b \;=\; \mathrm{ReLU}(a + b - 1) \qquad \text{for } a, b \in \{0, 1\}
+  $$
+
+  $$
+  a \;\mathrm{OR}\; b \;=\; \min(1,\, a + b) \;=\; a + b - (a \;\mathrm{AND}\; b)
+  $$
+
+  $$
+  a \oplus b \;=\; a + b - 2(a \;\mathrm{AND}\; b)
+  $$
+
+  $$
+  \mathrm{bit}_k(x) \;=\; \big(x \bmod 2^{k+1}\big) - \big(x \bmod 2^k\big)
+  $$
+
+  $$
+  (a + b) \bmod 2^n \;=\; a + b - 2^n \cdot \mathrm{ReLU}(a + b - 2^n) / (\text{leading 1})
+  $$
+
+  $$
+  \mathrm{ROTL}_s(x) \;=\; \big((x \ll s) \;\vert\; (x \gg (32 - s))\big) \bmod 2^{32}
+  $$
 
 Once we propagate the input domain forward through the network with an
-abstract lattice (Stage 3 below), every neuron resolves to a finite-domain
-value with a recognisable algebraic role. The decompiler walks the network
-and folds those structures into a higher-level Python program.
+abstract lattice, every neuron resolves to a finite-domain value with a
+recognisable algebraic role. The decompiler walks the network and folds
+those structures into a higher-level Python program.
 
-### 3.1 Pipeline
+### 8.1 Pipeline
 
 ```
 PyTorch Sequential
        │
        ▼  Stage 1  SSA + sparse weighted DAG       neurodecomp.sparse_graph
        │
-       ▼  Stage 2  Affine canonicalisation          neurodecomp.canonical
+       ▼  Stage 2  Affine canonicalisation         neurodecomp.canonical
        │
-       ▼  Stage 3  Abstract interpretation          neurodecomp.{domains,interp}
-       │            Lattice:                        
+       ▼  Stage 3  Abstract interpretation         neurodecomp.{domains,interp}
+       │            Lattice:
        │              Const(c) | Dead | Bool | Bit(k)
        │              | SmallSet | Byte | UInt(b)
        │              | Interval | Affine | Top
        │
-       ▼  Stage 4  Block discovery + loop folding   neurodecomp.block_finder
+       ▼  Stage 4  Block discovery + loop folding  neurodecomp.block_finder
        │            (periodicity, weight tying)
        │
-       ▼  Stage 5  Motif library                    neurodecomp.motifs
-       │            δ, XOR, AND/OR/NOT, bit-extract,
+       ▼  Stage 5  Motif library                   neurodecomp.motifs
+       │            δ, AND/OR/NOT/XOR, bit-extract,
        │            bit-pack, mod-2^n add, rotL/rotR
        │
-       ▼  Stage 6  Register inference               neurodecomp.registers
+       ▼  Stage 6  Register inference              neurodecomp.registers
        │            bits → bytes → 32-bit words
        │
-       ▼  Stage 7  Codegen                          neurodecomp.emit
+       ▼  Stage 7  Codegen                         neurodecomp.emit
        │
-       ▼  Stage 8  Validation                       neurodecomp.validate
+       ▼  Stage 8  Validation                      neurodecomp.validate
                     random equivalence,
                     intermediate trace comparison,
-                    Z3 proofs for motifs on
-                    bounded domains.
+                    Z3 proofs for motifs on bounded domains.
 ```
 
-### 3.2 Design rules
+### 8.2 Design rules
 
 1. **Never use finite value sets for wide neurons.** Enumeration is only
    allowed when $|V| \le 16$; abstract lattices otherwise.
@@ -233,32 +525,31 @@ PyTorch Sequential
    produces junk piecewise-linear extrapolation.
 3. **Canonicalise before motif matching.** Equivalent circuits may be
    syntactically rearranged (sign flips, ordering, gcd, dead ReLUs).
-4. **Use Z3 locally, never globally.** Z3 proves a motif matches its spec
-   on a small domain; it does not solve the whole network.
-5. **Block discovery comes early.** Decompile one representative iteration
-   and fold the rest; the period detector reports per-iteration deltas.
-6. **No algorithm-specific hard-coding in the core.** Anything that looks
-   like *"this looks like algorithm X"* belongs in a separate validation
-   pass, not in the decompiler.
+4. **Use Z3 locally, never globally.** Z3 proves a motif matches its
+   spec on a small domain; it does not solve the whole network.
+5. **Block discovery comes early.** Decompile one representative
+   iteration and fold the rest; the period detector reports
+   per-iteration deltas.
+6. **No algorithm-specific hard-coding in the core.** Anything that
+   looks like *"this looks like algorithm X"* belongs in a separate
+   validation pass, not in the decompiler.
 
 ---
 
-## 4. Status
+## 9. Status
 
 | Phase | Description | Status |
 |---|---|---|
-| 0 | Baseline scripts (replicating manual analysis) | ✅ `scripts/01-09` |
+| 0 | Baseline scripts (replicating manual analysis) | ✅ `scripts/01–09` |
 | 1 | NeuroDecomp scaffolding | ✅ `neurodecomp/` |
 | MVP-1 | Sparse Graph + Domain Profiler | ✅ `scripts/run_profile.py` |
-| MVP-2 | Tail Decompiler (AND-of-deltas → predicate list) | ⏳ |
+| MVP-2 | Tail Decompiler (AND-of-deltas → predicate list) | ✅ `scripts/run_tail.py` |
 | MVP-3 | Head Decompiler | ⏳ |
 | MVP-4 | One-iteration Body Decompiler | ⏳ |
 | MVP-5 | Full loop folding & codegen | ⏳ |
 | MVP-6 | Z3-backed motif library | ⏳ |
 
-### What MVP-1 currently reports on the benchmark target
-
-(All findings purely structural — no algorithm-specific heuristics.)
+### What MVP-1 currently reports
 
 ```text
 total modules   : 5442  (2721 Linear + 2721 ReLU, alternating)
@@ -276,13 +567,18 @@ output template : AND of 16 predicates of shape (a + c == 2b - 1) on integers
 ```
 
 The output template tells us, without naming the algorithm: the model is a
-boolean **AND of 16 integer-equality predicates**. The body looks like a
-weight-tied recurrent computation with two per-iteration deltas. That's a lot
-of information about the algorithm, recovered purely from weights.
+boolean **AND of 16 integer-equality predicates**. The body is a
+weight-tied recurrent computation with two per-iteration deltas. That's a
+lot of information about the algorithm, recovered purely from weights.
+
+(`MVP-1` currently sees 31 of the 63 body iterations — the period
+detector's longest-run heuristic stops at the first stitching layer.
+Merging across stitching layers will recover all 63; that's a small
+follow-up.)
 
 ---
 
-## 5. Reproducing
+## 10. Reproducing
 
 ```powershell
 # Weights (.gitignored; 1.16 GB)
@@ -298,37 +594,65 @@ python -m unittest discover tests
 python scripts/run_profile.py model_3_11.pt
 ```
 
-## 6. Layout
+---
+
+## 11. Roadmap (open questions)
+
+- [x] Locate head / body / tail; find period $p^\star = 42$.
+- [x] Verify weight tying across the 63 iterations.
+- [x] SVD the head; recover the standard-basis byte encoding.
+- [x] Decode the final Linear $L_{2721}$ analytically.
+- [x] Identify the input tokenizer (ASCII bytes, length 55, null pad).
+- [ ] Decode the penultimate Linear $L_{2720}$ symbolically: which
+  16 bytes does it extract, from where in the 288-bit state, with which
+  binary-to-integer mapping?
+- [ ] Decode one representative body block $B$. Express it as a Python
+  function $B(\text{state}, K_t, s_t) \to \text{state}$ where $K_t, s_t$
+  are the per-iteration constants extracted from position 28 (and other
+  varying slots).
+- [ ] Fold the 63 unrolled iterations; recover the tables of
+  per-iteration constants.
+- [ ] Decode the head: recover the input padding scheme.
+- [ ] Glue all stages; emit a single Python program $g$ such that
+  $g(s) = \mathrm{model}(s)$ for every $s \in \Sigma^{\le 55}$.
+- [ ] Identify the algorithm: compare $g$ against known
+  16-byte-output 128-bit compression functions.
+
+---
+
+## 12. Layout
 
 ```
 .
-├── README.md
+├── README.md                       ← this document
 ├── docs/
-│   ├── 00_problem.md              what the model presents to the world
-│   ├── 02_neurodecomp_design.md   pipeline, IR stack, design rules
-│   └── 99_spoilers.md             spoilers from the public solution (validation only)
+│   ├── 00_problem.md               what the model presents to the world
+│   ├── 02_neurodecomp_design.md    pipeline, IR stack, design rules
+│   └── 99_spoilers.md              public solution (validation only)
 ├── neurodecomp/
 │   ├── __init__.py
-│   ├── model_loader.py            load .pt + recover the tokenizer
-│   ├── sparse_graph.py            Stage 1
-│   └── block_finder.py            Stage 4
-├── scripts/                       reproducible exploratory analysis
+│   ├── model_loader.py             load .pt + recover the tokenizer
+│   ├── sparse_graph.py             Stage 1
+│   └── block_finder.py             Stage 4
+├── scripts/                        reproducible exploratory analysis
 │   ├── 01_arch_summary.py
 │   ├── 02_deep_analysis.py
 │   ├── 03_encoding_probe.py
 │   ├── 05_extract_tokenizer.py
 │   ├── 06_verify_tokenizer.py
 │   ├── 07_find_nonzero.py
-│   ├── 09_verify_md5.py           validation only (spoiler)
-│   └── run_profile.py             MVP-1 entry point
+│   ├── 09_verify_md5.py            validation only (spoiler)
+│   └── run_profile.py              MVP-1 entry point
 ├── tests/
 │   ├── toy_circuits.py
 │   ├── test_sparse_graph.py
 │   └── test_block_finder.py
-└── artifacts/                     analysis outputs (.json / .txt)
+└── artifacts/                      analysis outputs (.json / .txt)
 ```
 
-## 7. References
+---
+
+## 13. References
 
 ### NN verification & analysis
 - α,β-CROWN — bound propagation: <https://github.com/Verified-Intelligence/alpha-beta-CROWN>
@@ -343,3 +667,4 @@ python scripts/run_profile.py model_3_11.pt
 
 ### Background
 - Sutton, *"The Bitter Lesson"*: <http://www.incompleteideas.net/IncIdeas/BitterLesson.html>
+- Adir's hand decompilation: <https://github.com/adirk0/Jane-Street-Puzzle>
