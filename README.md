@@ -611,7 +611,11 @@ confirms `model("bitter lesson") = 1`.
 | MVP-4 | One-iteration Body Decompiler (rotate gadget) | ✅ `scripts/run_body.py` |
 | MVP-6 | Z3-backed motif library | ✅ `scripts/run_motifs.py` |
 | MVP-7 | Domain-certified motif recognition | ✅ `scripts/run_certify.py` |
-| MVP-5 | Full loop folding & codegen | ⏳ next |
+| MVP-5 | Codegen — emit recovered Python program | ✅ `scripts/run_emit.py` |
+| MVP-8 | Per-iteration K constants | ⏳ |
+| MVP-9 | F/G/H/I + modular-add decode | ⏳ |
+| MVP-10 | Padding scheme decode | ⏳ |
+| MVP-7.5 | Richer abstract domain | ⏳ |
 
 ### What MVP-1 currently reports
 
@@ -667,6 +671,12 @@ python scripts/run_motifs.py model_3_11.pt
 # Domain-certified motif scan (MVP-7) -- confirms which candidates are
 # genuine boolean gates by carrying input domains through the network
 python scripts/run_certify.py model_3_11.pt
+
+# Emit the recovered Python program (MVP-5) -- combines everything above
+# into a self-documenting artifact with explicit NotImplementedError stubs
+# for the parts we haven't decompiled yet
+python scripts/run_emit.py model_3_11.pt
+# -> writes artifacts/recovered_program.py
 ```
 
 ---
