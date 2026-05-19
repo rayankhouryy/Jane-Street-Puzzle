@@ -546,8 +546,8 @@ PyTorch Sequential
 | MVP-2 | Tail Decompiler (AND-of-deltas → predicate list) | ✅ `scripts/run_tail.py` |
 | MVP-3 | Head Decompiler (abstract interpretation) | ✅ `scripts/run_head.py` |
 | MVP-4 | One-iteration Body Decompiler (rotate gadget) | ✅ `scripts/run_body.py` |
+| MVP-6 | Z3-backed motif library | ✅ `scripts/run_motifs.py` |
 | MVP-5 | Full loop folding & codegen | ⏳ |
-| MVP-6 | Z3-backed motif library | ⏳ |
 
 ### What MVP-1 currently reports
 
@@ -598,6 +598,12 @@ python scripts/run_tail.py model_3_11.pt
 
 # Head decompilation (MVP-3) -- abstract interp, recovers initial constants
 python scripts/run_head.py model_3_11.pt
+
+# Body decompilation (MVP-4) -- recovers per-iteration rotate schedule
+python scripts/run_body.py model_3_11.pt
+
+# Motif library scan (MVP-6) -- Z3-verified motif catalog + pattern matcher
+python scripts/run_motifs.py model_3_11.pt
 ```
 
 ---
@@ -623,6 +629,26 @@ python scripts/run_head.py model_3_11.pt
   ``D = 0x10325476``, plus the precomputed ``B & C = 0x88888888`` and
   ``~B = 0x10325476`` and the first round constant ``0xd76aa478``,
   packed as little-endian bytes in the head's working state.
+- [x] Decode one representative body block $B$.  Detect the rotate
+  gadget at the (only) varying in-block position and recover the
+  per-iteration shift schedule.  → `scripts/run_body.py` reports a
+  3-register × 32-bit rotate gadget at position 28 of 42 with the shift
+  schedule
+
+  ```
+  s[ 0..15]  = [7, 12, 17, 22] x 4
+  s[16..31]  = [5,  9, 14, 20] x 4
+  s[32..47]  = [4, 11, 16, 23] x 4
+  s[48..62]  = [6, 10, 15, 21] x ~4
+  ```
+
+  matching MD5's rotation table for all 63 recovered iterations.
+- [x] Build a Z3-verified motif catalog covering the
+  Kronecker $\delta$, boolean AND/OR/XOR/NOT, and threshold gadgets;
+  every motif is proved equivalent to its reference on import.  Scan
+  the model for instances.  → `scripts/run_motifs.py` finds **58,524
+  `bool_and`-pattern rows** across the network: 32 in the head, ~900
+  per body iteration, 1,784 in the tail.
 - [ ] Decode one representative body block $B$. Express it as a Python
   function $B(\text{state}, K_t, s_t) \to \text{state}$ where $K_t, s_t$
   are the per-iteration constants extracted from position 28 (and other
