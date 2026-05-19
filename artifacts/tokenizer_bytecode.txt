@@ -1,0 +1,30 @@
+  2           0 RESUME                   0
+              2 LOAD_GLOBAL              0 (model)
+             14 LOAD_METHOD              1 (forward)
+             36 LOAD_GLOBAL              4 (torch)
+             48 LOAD_METHOD              3 (Tensor)
+             70 LOAD_GLOBAL              9 (NULL + list)
+             82 LOAD_GLOBAL             11 (NULL + map)
+             94 LOAD_GLOBAL             12 (ord)
+            106 LOAD_GLOBAL             15 (NULL + str)
+            118 LOAD_FAST                0 (x)
+            120 PRECALL                  1
+            124 CALL                     1
+            134 LOAD_CONST               0 (None)
+            136 LOAD_CONST               1 (55)
+            138 BUILD_SLICE              2
+            140 BINARY_SUBSCR
+            150 LOAD_METHOD              8 (ljust)
+            172 LOAD_CONST               1 (55)
+            174 LOAD_CONST               2 ('\x00')
+            176 PRECALL                  2
+            180 CALL                     2
+            190 PRECALL                  2
+            194 CALL                     2
+            204 PRECALL                  1
+            208 CALL                     1
+            218 PRECALL                  1
+            222 CALL                     1
+            232 PRECALL                  1
+            236 CALL                     1
+            246 RETURN_VALUE

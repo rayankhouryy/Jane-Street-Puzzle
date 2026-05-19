@@ -1,0 +1,18 @@
+=== STRUCTURED SWEEPS ===
+sweeps: 353 samples in 1.69s, non-zero: 0
+
+=== RANDOM SEARCH (printable ASCII) ===
+random search: 50000 samples in 162.2s, non-zero hits: 0
+best random: ('', 0.0)
+
+=== GRADIENT ASCENT ===
+  trial 0: pre=    +nan  rounded f=0.0  s='\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000\\x-80000000'
+  trial 1: pre= -15.000  rounded f=0.0  s='3X+.7db3]iIQZl|+>avxxX&S2#ys XGG9a3`gqa 1fY*4{o;C"N,+LV'
+  trial 2: pre= -15.000  rounded f=0.0  s='<k2zo\'CQVZaR8e"3C8?(EY0MqJPKYm|m|L%9oO8+#\'Eih"l*E<FF%&H'
+  trial 3: pre= -15.000  rounded f=0.0  s='P:a%Lx<y`%mJ:u)TEq\\f`DE(hto.Q.54_3NQm+/4p>w`UOFUDOU*6u)'
+  trial 4: pre= -15.000  rounded f=0.0  s='L}`P&f.B?HPvUyl1d.;]_r@Og"q(PG6UvA3> d804jhs`?B]v\\99#Y5'
+  trial 5: pre= -15.000  rounded f=0.0  s='%x0J\\P/)tWv?]DM2_^ND2p,b?8W7ZX,WcbI(H_>an6ObSSU*SpykUe8'
+  trial 6: pre= -15.000  rounded f=0.0  s='(\'~m/ar~xsD?vi3yfi2\\?tGaWc?f.Z/!)th{u%/G0p+8"4vuqsyCdy_'
+  trial 7: pre= -15.000  rounded f=0.0  s='~gl?fTD55+opJ4smR9zb+|s>i4HwQ.?BFSzR2Qff$G,;`.`wR0>Y+f$'
+
+best gradient: ('3X+.7db3]iIQZl|+>avxxX&S2#ys XGG9a3`gqa 1fY*4{o;C"N,+LV', -15.0)
