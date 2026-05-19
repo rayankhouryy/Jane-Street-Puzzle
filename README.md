@@ -620,9 +620,10 @@ confirms `model("bitter lesson") = 1`.
 | MVP-7.6 | Motif-aware certification beyond AND (XOR, OR, delta) | ⏳ |
 | MVP-9a | Per-output-bit truth-table decoder | ✅ `scripts/run_round_decode.py` |
 | MVP-9b | Round-function building-block detection (per iteration) | ✅ `scripts/run_round_classify.py` |
-| MVP-9c | Full F/G/H/I 3-input function identification | ⏳ |
+| MVP-9c | Register-bit probe for clean F/G/H/I (synthetic only) | 🟡 partial |
+| MVP-9d | Register inference (A/B/C/D location in 288-dim state) | ⏳ |
+| MVP-10 | Padding scheme decode | ⏳ next |
 | MVP-8 | Per-iteration K constants (as residuals after MVP-9) | ⏳ |
-| MVP-10 | Padding scheme decode | ⏳ |
 
 ### What MVP-1 currently reports
 
@@ -687,6 +688,10 @@ python scripts/run_emit.py model_3_11.pt
 
 # Round decoder (MVP-9a) -- per-output-bit truth-table extraction
 python scripts/run_round_decode.py model_3_11.pt --iteration 20
+
+# Round-function classification (MVP-9b) -- detect AND-NOT / XOR
+# building-block clusters per iteration; distinguishes F/G vs H vs I rounds
+python scripts/run_round_classify.py model_3_11.pt --iterations 0,16,32,48,62
 ```
 
 ---
@@ -797,11 +802,17 @@ python scripts/run_round_decode.py model_3_11.pt --iteration 20
   This empirically distinguishes the iteration's round-function family
   without any algorithm knowledge.  Full 3-input function naming
   (clean F/G/H/I attribution per output bit) is the next milestone.
-- [ ] **MVP-9c.** Probe the *register-update* output bits (which have
-  high arity due to carry chains) by *holding the modular adder inputs
-  fixed* (e.g. zeroing K, M, A) and re-extracting the truth table.  The
-  resulting bit should reveal the pure 3-input round function on
-  (B_i, C_i, D_i) without the adder confound.
+- [x] **MVP-9c (synthetic only).** Register-bit truth-table probe:
+  for each iteration output bit, run abstract interpretation through
+  all 3-subsets of its dependencies to find a 3-input boolean function
+  matching MD5's F/G/H/I.  Works on synthetic single-bit F nets;
+  blocked on the real model because the iteration's input state
+  contains non-zero baseline values (IV, K, M) that must be matched —
+  i.e. it needs **register inference (MVP-9d)** as a prerequisite.
+- [ ] **MVP-9d.** Register inference: identify which 32-bit windows of
+  the 288-dim inter-iteration state hold registers A, B, C, D and
+  which hold the message word M and round constant K.  Likely via
+  bit-correlation patterns in the body's first layers.
 - [ ] **MVP-10.** Decode the head's padding scheme: input length
   counting, the ``0x80`` framing byte, and the length suffix.
 - [x] **MVP-7.5 — relational + motif-aware certification.** Record each

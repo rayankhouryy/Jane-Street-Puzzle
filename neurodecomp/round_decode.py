@@ -531,6 +531,151 @@ def find_round_function(
     return best
 
 
+def probe_with_subset(
+    subnet: nn.Sequential,
+    output_idx: int,
+    candidate_input_bits: Sequence[int],
+    in_dim: int,
+    *,
+    other_bits_value: float = 0.0,
+    input_value_for_one: float = 1.0,
+) -> Optional[Dict[Tuple[int, ...], int]]:
+    """Enumerate ``output_idx``'s truth table over the given subset of input
+    bits, holding all *other* inputs to ``other_bits_value``.
+
+    Returns the table if the output is integer-valued on every combination,
+    else None.
+    """
+    k = len(candidate_input_bits)
+    if k > 16:
+        return None
+    n = 1 << k
+    base = torch.full((in_dim,), other_bits_value, dtype=torch.float32)
+    batch = base.unsqueeze(0).expand(n, in_dim).clone()
+    for mask in range(n):
+        for j in range(k):
+            if (mask >> j) & 1:
+                batch[mask, candidate_input_bits[j]] = input_value_for_one
+    with torch.no_grad():
+        outs = subnet(batch)[:, output_idx]
+    table: Dict[Tuple[int, ...], int] = {}
+    for mask in range(n):
+        v = float(outs[mask].item())
+        if abs(v - round(v)) > 1e-6:
+            return None
+        bits = tuple((mask >> j) & 1 for j in range(k))
+        table[bits] = int(round(v))
+    return table
+
+
+def search_round_function_via_register_bit(
+    subnet: nn.Sequential,
+    output_idx: int,
+    in_dim: int,
+    *,
+    max_arity_for_search: int = 3,
+    num_probes: int = 4,
+) -> Optional[Dict]:
+    """For one register-update output bit, search for a 3-input subset of
+    inputs over which the bit's truth table is a named round function.
+
+    Strategy:
+      1. Find the full dependency set via batched probing.
+      2. If |deps| > max_arity_for_search, try every 3-subset of deps:
+         compute the truth table holding all other inputs zero; classify.
+      3. Return the first subset whose table matches a known
+         3-input named function (NAMED_3), with the round name.
+    """
+    deps = find_dependencies_batched(
+        subnet, output_idx, in_dim, num_probes=num_probes,
+    )
+    if not deps:
+        return None
+    if len(deps) <= max_arity_for_search:
+        # Already small; just classify the full truth table.
+        table = truth_table_batched(
+            subnet, output_idx, deps, in_dim, max_arity=max_arity_for_search,
+        )
+        if table is None:
+            return None
+        name, tid = classify_truth_table(table)
+        return {
+            "output_idx": output_idx,
+            "deps": deps,
+            "selected_subset": deps,
+            "table": table,
+            "table_id": tid,
+            "name": name,
+        }
+    # |deps| > max_arity_for_search: try 3-subsets.
+    from itertools import combinations
+    for subset in combinations(deps, max_arity_for_search):
+        table = probe_with_subset(subnet, output_idx, subset, in_dim)
+        if table is None:
+            continue
+        # Skip degenerate (all-zero or single-value) tables.
+        vals = set(table.values())
+        if len(vals) <= 1:
+            continue
+        # Skip non-boolean truth tables (multi-valued ints).
+        if not vals.issubset({0, 1}):
+            continue
+        name, tid = classify_truth_table(table)
+        if tid is not None and tid in NAMED_3 and "MD5 round" in NAMED_3[tid]:
+            return {
+                "output_idx": output_idx,
+                "deps": deps,
+                "selected_subset": list(subset),
+                "table": table,
+                "table_id": tid,
+                "name": NAMED_3[tid],
+            }
+    return None
+
+
+def identify_iteration_round(
+    subnet: nn.Sequential,
+    *,
+    max_outputs_to_try: int = 64,
+    output_offset: int = 32,
+    num_probes: int = 4,
+) -> Dict:
+    """Find which MD5 round function (F/G/H/I) the iteration computes by
+    searching its register-update output bits for a 3-input subset whose
+    truth table matches a named round function.
+
+    ``output_offset`` skips the early passthroughs and probes the
+    high-arity outputs that hold the freshly-updated register value.
+    """
+    in_dim = find_iteration_input_dim(subnet)
+    out_dim = find_iteration_output_dim(subnet)
+    found_rounds: Dict[str, int] = {}
+    found_subsets: List[Dict] = []
+    end = min(out_dim, output_offset + max_outputs_to_try)
+    for o in range(output_offset, end):
+        hit = search_round_function_via_register_bit(
+            subnet, o, in_dim, num_probes=num_probes,
+        )
+        if hit is None:
+            continue
+        if "MD5 round" not in hit["name"]:
+            continue
+        found_rounds[hit["name"]] = found_rounds.get(hit["name"], 0) + 1
+        found_subsets.append(hit)
+
+    if not found_rounds:
+        return {"round_name": "unknown", "evidence_count": 0,
+                "found_subsets": []}
+    # Pick the round name with the most hits.
+    top_name = max(found_rounds, key=found_rounds.get)
+    return {
+        "round_name": top_name,
+        "evidence_count": found_rounds[top_name],
+        "all_found_rounds": found_rounds,
+        "found_subsets": found_subsets[:5],
+    }
+
+
 def decode_iteration(
     subnet: nn.Sequential,
     iteration_index: int,
