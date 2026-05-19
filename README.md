@@ -622,7 +622,7 @@ confirms `model("bitter lesson") = 1`.
 | MVP-9b | Round-function building-block detection (per iteration) | ✅ `scripts/run_round_classify.py` |
 | MVP-9c | Register-bit probe for clean F/G/H/I (synthetic only) | 🟡 partial |
 | MVP-9d | Register inference (A/B/C/D location in 288-dim state) | ⏳ |
-| MVP-10 | Padding scheme decode | ⏳ next |
+| MVP-10 | Padding scheme decode | ✅ `scripts/run_padding.py` (partial) |
 | MVP-8 | Per-iteration K constants (as residuals after MVP-9) | ⏳ |
 
 ### What MVP-1 currently reports
@@ -692,6 +692,9 @@ python scripts/run_round_decode.py model_3_11.pt --iteration 20
 # Round-function classification (MVP-9b) -- detect AND-NOT / XOR
 # building-block clusters per iteration; distinguishes F/G vs H vs I rounds
 python scripts/run_round_classify.py model_3_11.pt --iterations 0,16,32,48,62
+
+# Padding scheme decode (MVP-10) -- classify head outputs by role
+python scripts/run_padding.py model_3_11.pt
 ```
 
 ---
@@ -813,8 +816,24 @@ python scripts/run_round_classify.py model_3_11.pt --iterations 0,16,32,48,62
   the 288-dim inter-iteration state hold registers A, B, C, D and
   which hold the message word M and round constant K.  Likely via
   bit-correlation patterns in the body's first layers.
-- [ ] **MVP-10.** Decode the head's padding scheme: input length
-  counting, the ``0x80`` framing byte, and the length suffix.
+- [x] **MVP-10 (initial padding decode).** Probe the head with diverse
+  varying-length inputs and classify each of the 336 outputs as
+  ``const`` / ``passthrough(byte_i, bit_k)`` / ``length_bit(k)`` /
+  ``length_indicator`` / ``mixed``.  → `scripts/run_padding.py` reports
+  on the benchmark:
+
+  ```
+  261  const             (IV + auxiliary constants)
+   28  passthrough       (input bytes carried through)
+   39  mixed             (opaque computations)
+    8  length_indicator  (one-hot encoding of L mod 8)
+  ```
+
+  The 8 length-indicator outputs (199, 207, 215, 223, 264, 265, 266, 267)
+  form a one-hot pattern over L = 0..7 — the **structural marker for
+  the `0x80` framing-byte placement**.  Full padding scheme recovery
+  (length-suffix bits, framing byte placement for L > 7) is the next
+  refinement.
 - [x] **MVP-7.5 — relational + motif-aware certification.** Record each
   saturating ReLU's *source affine*, allow recursive Booleanness checks
   through opaque chains, iterate Boolean confirmation through motifs,
