@@ -25,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .domains import Affine, VarName, affine_input_only
+from .domains import Affine, OpaqueSource, VarName, affine_input_only
 
 
 @dataclass
@@ -43,6 +43,11 @@ class InterpResult:
 
     # Total opaque symbols introduced.
     num_opaque: int = 0
+
+    # MVP-7.5: maps each opaque variable id to the source Affine that fed
+    # the saturating ReLU which produced it.  Used by the certifier to
+    # prove tighter facts than the raw range alone.
+    opaque_registry: Dict[VarName, OpaqueSource] = field(default_factory=dict)
 
 
 @dataclass
@@ -100,6 +105,7 @@ def run(
 
     layer_stats: List[Dict[str, int]] = []
     num_opaque = 0
+    opaque_registry: Dict[VarName, OpaqueSource] = {}
 
     for layer_idx, layer in enumerate(children):
         stats = {"layer": layer_idx, "kind": type(layer).__name__,
@@ -135,10 +141,11 @@ def run(
                     new_current.append(Affine.const(0))
                     stats["dead"] += 1
                 else:
-                    # Saturating: introduce an opaque symbol.
+                    # Saturating: introduce an opaque symbol *with source*.
                     sym: VarName = ("relu", num_opaque)
                     num_opaque += 1
                     var_ranges[sym] = (0, int(hi))
+                    opaque_registry[sym] = OpaqueSource(expr=src)
                     new_current.append(Affine.of(sym, 1, 0))
                     stats["sat"] += 1
             current = new_current
@@ -156,6 +163,7 @@ def run(
         var_ranges=var_ranges,
         layer_stats=layer_stats,
         num_opaque=num_opaque,
+        opaque_registry=opaque_registry,
     )
 
 

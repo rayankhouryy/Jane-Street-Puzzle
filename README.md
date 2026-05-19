@@ -557,28 +557,33 @@ algorithm-specific code:
   iterations** (one round absorbed into head/tail/stitching),
 * a **Z3-proven catalog of 6 ReLU motifs** (Kronecker delta, AND, OR, XOR,
   NOT, threshold), with **58,524 candidate boolean-AND row patterns**
-  located across the network and **12,859 of them (22 %) confirmed as
-  genuine booleans** by domain certification through abstract
-  interpretation.
+  located across the network and **6,674 of them (11.4 %) confirmed as
+  genuine two-input booleans** by domain certification through abstract
+  interpretation with motif-aware iterative refinement.
 
-> **From candidates to confirmed.**
+> **From candidates to genuine boolean gates.**
 > The motif scanner identifies the row pattern `ReLU(a + b - 1)`, which
-> is a *true* AND only when both inputs are certified booleans.
-> MVP-7's domain certifier runs abstract interpretation over the network
-> starting from the byte domain `[0, 255]^55`, and checks each candidate
-> against its inputs' certified abstract range.  This drops the count
-> from 58 k → 13 k, and yields a much more honest per-region breakdown:
+> is a *true* 2-input AND only when both inputs are certified Booleans
+> *and* neither input is degenerate (constant 0 or 1; "AND with 0" is
+> just a threshold step). MVP-7 + MVP-7.5's certifier runs abstract
+> interpretation over the network from the byte domain `[0, 255]^55`,
+> records the source affine of every saturating ReLU (relational
+> domain), iterates over the motif set propagating Booleanness through
+> confirmed motif outputs, and rejects degenerate ANDs (constant input).
 >
-> | region | candidates | confirmed | rate |
-> |---|---|---|---|
-> | head | 32 | 32 | 100 % |
-> | body | 56,708 | 12,575 | 22.2 % |
-> | tail | 1,784 | 252 | 14.1 % |
+> The honest per-region breakdown:
 >
-> The remaining 78 % candidates lose certification because our Affine
-> abstract domain widens its bounds through saturating ReLUs.  Richer
-> domains (e.g. bit-vector tracking of opaque ReLU symbols) are listed
-> as future work in MVP-7.5.
+> | region | candidates | confirmed | rate | interpretation |
+> |---|---|---|---|---|
+> | head | 32 | 0 | 0 % | all 32 candidates are degenerate — they're padding-logic threshold steps, not real ANDs |
+> | body | 56,708 | 6,492 | 11.4 % | ≈ 103 per iteration — consistent with MD5's true AND count per round (F/G/H/I have ~32-48 each) |
+> | tail | 1,784 | 182 | 10.2 % | digest-decoder AND-of-deltas region |
+>
+> The remaining 89 % candidates lose certification because our Affine
+> abstract domain widens through saturating ReLUs in ways our recursive
+> source-expression check can't yet refine.  Closing that gap requires
+> motif-aware iterative certification of further motifs (XOR, OR, delta)
+> beyond AND — listed as MVP-7.6 in the roadmap.
 
 Independent confirmation that the algorithm is MD5 comes from
 [adirk0/Jane-Street-Puzzle](https://github.com/adirk0/Jane-Street-Puzzle);
@@ -610,12 +615,12 @@ confirms `model("bitter lesson") = 1`.
 | MVP-3 | Head Decompiler (abstract interpretation) | ✅ `scripts/run_head.py` |
 | MVP-4 | One-iteration Body Decompiler (rotate gadget) | ✅ `scripts/run_body.py` |
 | MVP-6 | Z3-backed motif library | ✅ `scripts/run_motifs.py` |
-| MVP-7 | Domain-certified motif recognition | ✅ `scripts/run_certify.py` |
+| MVP-7 | Domain-certified motif recognition (relational + motif-aware) | ✅ `scripts/run_certify.py` |
 | MVP-5 | Codegen — emit recovered Python program | ✅ `scripts/run_emit.py` |
-| MVP-8 | Per-iteration K constants | ⏳ |
-| MVP-9 | F/G/H/I + modular-add decode | ⏳ |
+| MVP-7.6 | Motif-aware certification beyond AND (XOR, OR, delta) | ⏳ |
+| MVP-9 | F/G/H/I + modular-add round decode | ⏳ |
+| MVP-8 | Per-iteration K constants (as residuals after MVP-9) | ⏳ |
 | MVP-10 | Padding scheme decode | ⏳ |
-| MVP-7.5 | Richer abstract domain | ⏳ |
 
 ### What MVP-1 currently reports
 
@@ -725,26 +730,46 @@ python scripts/run_emit.py model_3_11.pt
   `bool_and`-pattern rows** (32 in the head, ~900 per body iteration,
   1,784 in the tail).
 - [x] **Domain-certify the motif candidates.** Run abstract
-  interpretation over the model from the byte input domain and check
-  each candidate AND against its inputs' certified domain.  →
-  `scripts/run_certify.py` confirms **12,859 of 58,524** candidates
-  (22 %): all 32 in the head, 12,575 of 56,708 in the body (~200
-  per iteration -- consistent with MD5's per-round F/G/H/I + modular
-  adders), 252 of 1,784 in the tail.
-- [ ] Recover the per-iteration constant table $K_i$ for
+  interpretation over the model from the byte input domain, record the
+  source affine of every saturating ReLU (relational domain), iterate
+  motif-aware Booleanness through the motif set, and check each
+  candidate AND against its inputs' certified domain (rejecting
+  degenerate ANDs whose other input is a constant).  →
+  `scripts/run_certify.py` confirms **6,674 of 58,524** candidates
+  (11.4 %) as genuine 2-input boolean ANDs: 0 of 32 in the head (all
+  degenerate / padding-logic), 6,492 of 56,708 in the body (~103 per
+  iteration — consistent with MD5's per-round F/G/H/I AND count), 182
+  of 1,784 in the tail.
+- [x] **MVP-5 (initial codegen).** Combine the recovered tokenizer, IV,
+  shift schedule, target digest, and AND-certification counts into a
+  self-documenting Python file
+  ``artifacts/recovered_program.py``.  Recovered pieces run end-to-end;
+  unrecovered pieces raise ``NotImplementedError`` with clear pointers to
+  the pending MVP that will fill each gap.
+- [ ] **MVP-8.** Recover the per-iteration constant table $K_i$ for
   $i \in \{1, \dots, 63\}$.  Only $K[0]$ has been recovered so far
   (from the head's IV stamping).  Candidates: position-41 shape-368
   bias deltas (16 iterations of 32-bit constants observed
   exploratorily), or symbolic propagation through the body.
-- [ ] Decode the F/G/H/I non-linear round functions of one body
-  iteration into Python via motif-driven simplification of the
+- [ ] **MVP-9.** Decode the F/G/H/I non-linear round functions of one
+  body iteration into Python via motif-driven simplification of the
   abstract-interpretation output.
-- [ ] Glue all stages; emit a single Python program $g$ such that
-  $g(s) = \mathrm{model}(s)$ for every $s \in \Sigma^{\le 55}$.
-- [ ] Identify the algorithm: compare $g$ against known
-  16-byte-output 128-bit compression functions.  (External validation
-  oracle [`docs/99_spoilers.md`](docs/99_spoilers.md) confirms MD5;
-  we use it only to check the decompiler's output.)
+- [ ] **MVP-10.** Decode the head's padding scheme: input length
+  counting, the ``0x80`` framing byte, and the length suffix.
+- [x] **MVP-7.5 — relational + motif-aware certification.** Record each
+  saturating ReLU's *source affine*, allow recursive Booleanness checks
+  through opaque chains, iterate Boolean confirmation through motifs,
+  and reject degenerate AND patterns (one input constant). This shrunk
+  the confirmed AND count from 12,859 → 6,674 — a more honest figure
+  reflecting only true 2-input booleans.
+- [ ] **MVP-7.6.** Extend motif-aware certification to XOR, OR, delta
+  outputs (currently only AND outputs propagate Booleanness through
+  the iterative pass). Expected to unlock another tranche of confirmed
+  ANDs in the body that are currently fed by XOR-style gadgets.
+- [ ] **Final.** Glue all stages; emit a Python program $g$ such that
+  $g(s) = \mathrm{model}(s)$ for every $s \in \Sigma^{\le 55}$ and
+  identify the algorithm by comparing $g$ against known compression
+  functions.
 - [ ] Decode one representative body block $B$. Express it as a Python
   function $B(\text{state}, K_t, s_t) \to \text{state}$ where $K_t, s_t$
   are the per-iteration constants extracted from position 28 (and other

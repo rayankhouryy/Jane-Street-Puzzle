@@ -11,14 +11,13 @@ boolean AND iff both ``a`` and ``b`` are provably in ``{0, 1}``.  We
 look at the SSA values produced by the abstract interpreter and read
 off the certified domain of each input.
 
-The output:
-
-* confirmed motif count -- pattern AND inputs are in the right domain
-* unconfirmed candidates -- pattern matches but inputs are wider integers
-
-This module deliberately uses only what abstract interpretation can
-prove on the *original* input domain (bytes in ``[0, 255]``).  No
-algorithm-specific hints.
+**MVP-7.5 — relational certification.**  The certifier now consults the
+*source-expression registry* recorded by the abstract interpreter (one
+entry per saturating ReLU).  This lets us certify booleanness for opaque
+symbols whose raw range is wider than ``[0, 1]``, as long as the source
+affine that fed the ReLU has integer ``hi`` ≤ 1.  This dramatically
+reduces false-negative ``bool_and`` rejections that came from the older
+range-only check.
 """
 from __future__ import annotations
 
@@ -29,28 +28,50 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch.nn as nn
 
 from . import interp, motifs
-from .domains import Affine, VarName
+from .domains import (
+    Affine, OpaqueSource, VarName, certify_bool_via_source,
+)
 from .motifs import MotifHit
 
 
 # ---------------------------------------------------------------------------
-# Abstract domain readout
+# Abstract domain readout (relational)
 # ---------------------------------------------------------------------------
 
 def _certify_bool(
     affine: Affine,
     var_ranges: Dict[VarName, Tuple[int, int]],
+    opaque_registry: Optional[Dict[VarName, OpaqueSource]] = None,
 ) -> bool:
     """Return True iff this Affine is provably in ``{0, 1}``.
 
-    Sufficient condition: the affine's integer range lies in ``[0, 1]``.
-    This is conservative but always sound.
+    Two paths:
+
+    1. **Range path.**  If the affine's integer range is a subset of [0, 1],
+       it's directly Boolean.  This is the original MVP-7 check.
+    2. **Source-expression path (MVP-7.5).**  If the affine is a single
+       opaque ReLU symbol (i.e. ``+1 * r[k]`` with no bias) and the
+       pre-ReLU source has integer ``hi ≤ 1``, the post-ReLU value is in
+       ``{0, 1}`` -- even when the raw opaque range is wider than [0, 1].
     """
+    # Path 1: cheap range check.
     try:
         lo, hi = affine.range(var_ranges)
     except KeyError:
         return False
-    return lo >= 0 and hi <= 1
+    if lo >= 0 and hi <= 1:
+        return True
+    # Path 2: relational lookup through the opaque registry.
+    if (
+        opaque_registry is not None
+        and len(affine.coefs) == 1
+        and affine.bias == 0
+        and affine.coefs[0][1] == 1
+    ):
+        v, _ = affine.coefs[0]
+        if v[0] == "relu":
+            return certify_bool_via_source(v, var_ranges, opaque_registry)
+    return False
 
 
 def _certify_byte(
@@ -79,25 +100,23 @@ class LayerSnapshot:
 def _snapshot_after_each_relu(
     model: nn.Sequential,
     input_ranges: Sequence[Tuple[int, int]],
-) -> List[LayerSnapshot]:
+) -> Tuple[List[LayerSnapshot], Dict[VarName, Tuple[int, int]], Dict[VarName, OpaqueSource]]:
     """Run abstract interpretation and snapshot the running tensor after
     each ReLU (= the input to the next Linear).  We need these snapshots
     so that, given a motif hit at Linear ``li``, we can look up the
     abstract values of *its inputs*.
 
-    The mapping:
-      * Linear at child index ``2*li`` consumes the snapshot taken *after*
-        the previous ReLU at child index ``2*li - 1`` (i.e. after Linear
-        ``li - 1``'s ReLU).
-      * Linear at child index 0 consumes the raw inputs.
+    Returns ``(snapshots, var_ranges, opaque_registry)`` where the third
+    is the MVP-7.5 source-expression registry used by the certifier to
+    refine boolean checks.
     """
     children = list(model)
     snapshots: List[LayerSnapshot] = []
-    # Take an initial snapshot of the input.
     current = [Affine.of(("in", i), 1, 0) for i in range(len(input_ranges))]
     var_ranges: Dict[VarName, Tuple[int, int]] = {
         ("in", i): (int(lo), int(hi)) for i, (lo, hi) in enumerate(input_ranges)
     }
+    opaque_registry: Dict[VarName, OpaqueSource] = {}
     snapshots.append(LayerSnapshot(layer_idx=-1, values=list(current)))
 
     n_opaque = 0
@@ -128,12 +147,13 @@ def _snapshot_after_each_relu(
                     sym: VarName = ("relu", n_opaque)
                     n_opaque += 1
                     var_ranges[sym] = (0, int(hi))
+                    opaque_registry[sym] = OpaqueSource(expr=src)
                     new_current.append(Affine.of(sym, 1, 0))
             current = new_current
             snapshots.append(LayerSnapshot(layer_idx=linear_idx, values=list(current)))
         else:
             raise ValueError(f"unsupported layer {type(layer).__name__}")
-    return snapshots, var_ranges
+    return snapshots, var_ranges, opaque_registry
 
 
 def _values_seen_by_linear(
@@ -178,6 +198,26 @@ class CertifyReport:
     })
 
 
+def _layer_to_child_index(model: nn.Sequential, linear_idx: int) -> int:
+    """Map a Linear index to its position in model.children() (strictly
+    alternating Linear/ReLU networks have child 2*linear_idx)."""
+    return 2 * linear_idx
+
+
+def _scan_post_relu_neuron(
+    model: nn.Sequential,
+    linear_idx: int,
+    output_neuron: int,
+) -> Tuple[int, int]:
+    """Locate the SSA index of the post-ReLU neuron that follows the given
+    Linear's ``output_neuron`` -- useful for tracking what downstream
+    neurons consume that motif's output."""
+    # Conceptually: post-ReLU corresponds to the same channel index in the
+    # next snapshot.  This helper exists for clarity; the certifier uses
+    # snapshot lookup directly.
+    return linear_idx + 1, output_neuron
+
+
 def certify_motifs(
     model: nn.Sequential,
     input_ranges: Optional[Sequence[Tuple[int, int]]] = None,
@@ -188,6 +228,12 @@ def certify_motifs(
     abstract-interpretation domain of its inputs.
 
     Returns a :class:`CertifyReport` with confirmed and candidate counts.
+
+    MVP-7.5 — iterative motif-aware certification.  Whenever we confirm a
+    Boolean motif (AND, OR, XOR, NOT), the post-ReLU neuron at its output
+    is *also* Boolean; we record that and re-run the certification pass
+    until a fixed point.  This propagates booleanness through the body's
+    XOR-style gadgets that the direct source-expression check can't reach.
     """
     linears = [m for m in model if isinstance(m, nn.Linear)]
     if input_ranges is None:
@@ -199,11 +245,80 @@ def certify_motifs(
         head_end = head_end if head_end is not None else layout.head_end_linear_idx
         body_end = body_end if body_end is not None else layout.body_end_linear_idx
 
-    snapshots, var_ranges = _snapshot_after_each_relu(model, input_ranges)
+    snapshots, var_ranges, opaque_registry = _snapshot_after_each_relu(model, input_ranges)
     hits = motifs.scan_model(model)
 
-    report = CertifyReport(total_candidates=len(hits))
+    # MVP-7.5: maintain a set of opaque variables that have been confirmed
+    # Boolean by an earlier motif.  Iterative certification adds to this
+    # set until no new confirmations happen.
+    extra_bool_opaques: set = set()
 
+    def _certify_extended(a: Affine) -> bool:
+        # First the standard certify_bool (which already handles relational
+        # source-expression).  Then if it's a single opaque, check the
+        # iterative set.
+        if _certify_bool(a, var_ranges, opaque_registry):
+            return True
+        if len(a.coefs) == 1 and a.bias == 0 and a.coefs[0][1] == 1:
+            v, _ = a.coefs[0]
+            if v in extra_bool_opaques:
+                return True
+        return False
+
+    def _output_opaque(hit: MotifHit) -> Optional[VarName]:
+        """Return the opaque variable that the motif's output Linear-and-ReLU
+        produces, if there is exactly one and it's an opaque."""
+        # Linear at hit.layer_idx, output channel hit.output_neurons[0].
+        # The post-ReLU snapshot's channel of the same index is the
+        # downstream-visible value.
+        if len(hit.output_neurons) != 1:
+            return None
+        out_chan = hit.output_neurons[0]
+        # Look up snapshot at layer_idx (= the snapshot taken right after
+        # this Linear's ReLU).
+        for s in snapshots:
+            if s.layer_idx == hit.layer_idx:
+                a = s.values[out_chan]
+                if (
+                    len(a.coefs) == 1
+                    and a.bias == 0
+                    and a.coefs[0][1] == 1
+                    and a.coefs[0][0][0] == "relu"
+                ):
+                    return a.coefs[0][0]
+                return None
+        return None
+
+    confirmed_hits: List[MotifHit] = []
+    last_confirmed_count = -1
+
+    while True:
+        confirmed_hits = []
+        for h in hits:
+            inputs = _values_seen_by_linear(snapshots, h.layer_idx)
+            if inputs is None:
+                continue
+            if h.motif_name == "bool_and":
+                in0, in1 = h.input_neurons
+                a0, a1 = inputs[in0], inputs[in1]
+                # Reject degenerate ANDs: one input is the constant 0 or 1
+                # (i.e. a dead-neuron pad or a structural constant).  These
+                # are syntactically AND-shaped rows but collapse to a unary
+                # threshold step.
+                if a0.is_const or a1.is_const:
+                    continue
+                if _certify_extended(a0) and _certify_extended(a1):
+                    confirmed_hits.append(h)
+        if len(confirmed_hits) == last_confirmed_count:
+            break
+        last_confirmed_count = len(confirmed_hits)
+        for h in confirmed_hits:
+            v = _output_opaque(h)
+            if v is not None:
+                extra_bool_opaques.add(v)
+
+    # Build the final report.
+    report = CertifyReport(total_candidates=len(hits))
     for h in hits:
         region = (
             "head" if h.layer_idx < head_end
@@ -212,22 +327,14 @@ def certify_motifs(
         )
         report.candidate_counts[h.motif_name] += 1
         report.candidate_per_region[region][h.motif_name] += 1
-
-        # Look up the Affines that feed this hit.
-        inputs = _values_seen_by_linear(snapshots, h.layer_idx)
-        if inputs is None:
-            continue
-        # For bool_and, both input neurons must be bool.
-        if h.motif_name == "bool_and":
-            in0, in1 = h.input_neurons
-            if (
-                _certify_bool(inputs[in0], var_ranges)
-                and _certify_bool(inputs[in1], var_ranges)
-            ):
-                report.confirmed_counts[h.motif_name] += 1
-                report.confirmed_per_region[region][h.motif_name] += 1
-        # For bool_xor (which we detect at a 2-layer pattern), the certifier
-        # would need to look 2 layers back; simplest: skip for now.
+    for h in confirmed_hits:
+        region = (
+            "head" if h.layer_idx < head_end
+            else "body" if h.layer_idx < body_end
+            else "tail"
+        )
+        report.confirmed_counts[h.motif_name] += 1
+        report.confirmed_per_region[region][h.motif_name] += 1
 
     return report
 

@@ -46,17 +46,51 @@ class CertifyTests(unittest.TestCase):
         self.assertEqual(rep.candidate_counts["bool_and"], 1)
         self.assertEqual(rep.confirmed_counts["bool_and"], 0)
 
-    def test_certifier_propagates_through_threshold_step(self):
-        """Deeper certification through opaque ReLU symbols is *not* expected
-        to succeed with our current Affine-only abstract domain.  This test
-        documents the limitation: when the abstract interpreter introduces
-        opaque symbols, downstream candidate ANDs over those symbols are
-        correctly marked as *not* confirmed (because the symbol ranges are
-        too wide to certify booleanness).
+    def test_certifier_confirms_bool_input_to_relu(self):
+        """MVP-7.5 — when a ReLU is fed an affine with integer hi ≤ 1, the
+        post-ReLU output is provably in {0, 1} even if the affine's lo is
+        negative.
 
-        Closing this gap requires a richer abstract domain (e.g. tracking
-        that ``opaque[k] <= original_var[k]`` relations) -- noted as a
-        future improvement in the README's MVP-7.5.
+        Example: ReLU(a + b - 1) where a, b are bytes in [0, 1].
+        Input affine has range [-1, 1] → straddles zero → opaque.
+        Source-expression check (hi = 1 ≤ 1) certifies booleanness.
+
+        With the old range-only check this opaque was unconfirmable; now it
+        is.
+        """
+        # Network: two boolean inputs → one explicit ReLU(a + b - 1) →
+        # another bool_and downstream that consumes the result.
+        # The downstream Linear computes ReLU((a AND b) + (a AND b) - 1)
+        # which the scanner recognises as bool_and; certifier should
+        # confirm because the input is a relational-Boolean opaque.
+        net = nn.Sequential(
+            _linear(
+                [
+                    [1.0, 1.0],
+                    [1.0, 1.0],
+                ],
+                [-1.0, -1.0],
+            ),
+            nn.ReLU(),
+            _linear([[1.0, 1.0]], [-1.0]),
+            nn.ReLU(),
+        )
+        rep = certify.certify_motifs(net, input_ranges=[(0, 1), (0, 1)])
+        # Two candidate AND patterns (one in each Linear); both should be
+        # confirmed: the first directly from the input bool domain, the
+        # second via the relational source-expression check.
+        self.assertEqual(rep.candidate_counts["bool_and"], 3)
+        self.assertGreaterEqual(rep.confirmed_counts["bool_and"], 2)
+
+    def test_certifier_does_not_overclaim_kron_delta_chain(self):
+        """Documented limitation: Boolean output of a Kronecker-delta triple
+        (which sums three ReLUs to encode `1[x == c]`) is not yet certified.
+
+        The triple's *combined* output is in {0, 1}, but each individual
+        ReLU's source affine has range like [-254, 255], so the simple
+        ``hi ≤ 1 on source`` check doesn't fire.  Certifying this case
+        requires recognising the delta motif algebraically -- left for
+        MVP-7.6 or motif-aware certification.
         """
         net = nn.Sequential(
             _linear(
@@ -79,10 +113,11 @@ class CertifyTests(unittest.TestCase):
             nn.ReLU(),
         )
         rep = certify.certify_motifs(net, input_ranges=[(0, 255), (0, 255)])
-        # The scanner still finds the candidate; the certifier sets it to
-        # unconfirmed because the upstream ReLUs saturate and the abstract
-        # bounds widen beyond {0, 1}.
+        # The scanner finds the final bool_and candidate; the current
+        # certifier conservatively leaves it unconfirmed.
         self.assertGreaterEqual(rep.candidate_counts["bool_and"], 1)
+        # NOTE: this expectation will tighten when motif-aware certification
+        # (MVP-7.6) is added.
         self.assertEqual(rep.confirmed_counts["bool_and"], 0)
 
 
