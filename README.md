@@ -618,7 +618,8 @@ confirms `model("bitter lesson") = 1`.
 | MVP-7 | Domain-certified motif recognition (relational + motif-aware) | ✅ `scripts/run_certify.py` |
 | MVP-5 | Codegen — emit recovered Python program | ✅ `scripts/run_emit.py` |
 | MVP-7.6 | Motif-aware certification beyond AND (XOR, OR, delta) | ⏳ |
-| MVP-9 | F/G/H/I + modular-add round decode | ⏳ |
+| MVP-9a | Per-output-bit truth-table decoder | ✅ `scripts/run_round_decode.py` |
+| MVP-9 | Full F/G/H/I + modular-add round decode | ⏳ |
 | MVP-8 | Per-iteration K constants (as residuals after MVP-9) | ⏳ |
 | MVP-10 | Padding scheme decode | ⏳ |
 
