@@ -83,18 +83,45 @@ def _longest_periodic_run(widths: List[int], period: int) -> Tuple[int, int]:
 # Block-start phase alignment
 # ---------------------------------------------------------------------------
 
-def _phase_align_block_starts(
-    head_offset: int,
-    body_end: int,
+def _find_block_starts_phase(
+    linears: List[nn.Linear],
     period: int,
+    *,
+    head_skip: int = 2,
+    width_jump_ratio: float = 1.3,
 ) -> List[int]:
-    """Given the head/body/tail split and the period, emit one block-start
-    per iteration. Block starts are at head_offset, head_offset + period, …
+    """Phase-aligned block-start finder that survives stitching layers.
 
-    The width index space and the Linear index space agree because widths[0]
-    is the input width and widths[i+1] is the output of Linear i.
+    Body block starts are characterised by:
+
+    * a *strict jump* in input width relative to the previous Linear's input
+      (``cur_in / prev_in >= width_jump_ratio``),
+    * a compression at the current Linear (``in_features > out_features``).
+
+    All such Linears are projected onto their offset modulo ``period`` and the
+    dominant phase is the loop's block-start phase.  This survives stitching
+    boundaries where minor widths differ.
     """
-    return list(range(head_offset, body_end, period))
+    from collections import Counter
+
+    candidates: List[int] = []
+    for i, l in enumerate(linears):
+        if i < head_skip:
+            continue
+        prev_in = linears[i - 1].in_features if i > 0 else 0
+        if (
+            prev_in > 0
+            and l.in_features >= width_jump_ratio * prev_in
+            and l.in_features > l.out_features
+        ):
+            candidates.append(i)
+    if not candidates:
+        return []
+
+    offsets = Counter(c % period for c in candidates)
+    dominant_offset, _ = offsets.most_common(1)[0]
+    starts = sorted(c for c in candidates if c % period == dominant_offset)
+    return starts
 
 
 # ---------------------------------------------------------------------------
@@ -116,11 +143,21 @@ def find_blocks(model: nn.Sequential, min_iterations: int = 3) -> LayoutReport:
     widths = [linears[0].in_features] + [l.out_features for l in linears]
 
     period, ratio = _find_period(widths)
-    body_run = _longest_periodic_run(widths, period)
-    head_end, body_end = body_run
 
-    # Number of iterations covered by the run.
-    n_iters = (body_end - head_end) // period if period else 0
+    # Phase-grouped block-start enumeration.  This survives stitching layers
+    # where the longest contiguous-run heuristic gives up.
+    if period > 1:
+        block_starts = _find_block_starts_phase(linears, period)
+    else:
+        block_starts = []
+
+    if not block_starts:
+        head_end, body_end = 0, len(linears)
+        n_iters = 0
+    else:
+        head_end = block_starts[0]
+        body_end = block_starts[-1] + period
+        n_iters = len(block_starts)
 
     if period <= 1 or n_iters < min_iterations:
         return LayoutReport(
@@ -137,8 +174,6 @@ def find_blocks(model: nn.Sequential, min_iterations: int = 3) -> LayoutReport:
                 f"(period={period}, iterations={n_iters})"
             ],
         )
-
-    block_starts = _phase_align_block_starts(head_end, body_end, period)
 
     # Per-position dispersion of weights across iterations.
     dispersions: List[float] = []

@@ -29,8 +29,9 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-from . import block_finder, head, interp, model_loader, sparse_graph, tail
+from . import block_finder, body, head, interp, model_loader, sparse_graph, tail
 from .block_finder import find_blocks
+from .body import decompile_body
 from .head import decompile_head
 from .model_loader import load_model, recover_tokenizer
 from .sparse_graph import extract_ssa
@@ -43,7 +44,9 @@ __all__ = [
     "recover_tokenizer",
     "decompile_tail",
     "decompile_head",
+    "decompile_body",
     "block_finder",
+    "body",
     "head",
     "interp",
     "model_loader",

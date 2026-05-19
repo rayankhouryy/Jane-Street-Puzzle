@@ -545,7 +545,7 @@ PyTorch Sequential
 | MVP-1 | Sparse Graph + Domain Profiler | ✅ `scripts/run_profile.py` |
 | MVP-2 | Tail Decompiler (AND-of-deltas → predicate list) | ✅ `scripts/run_tail.py` |
 | MVP-3 | Head Decompiler (abstract interpretation) | ✅ `scripts/run_head.py` |
-| MVP-4 | One-iteration Body Decompiler | ⏳ |
+| MVP-4 | One-iteration Body Decompiler (rotate gadget) | ✅ `scripts/run_body.py` |
 | MVP-5 | Full loop folding & codegen | ⏳ |
 | MVP-6 | Z3-backed motif library | ⏳ |
 
