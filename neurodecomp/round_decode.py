@@ -387,6 +387,150 @@ def truth_table_batched(
     return table
 
 
+def list_intermediate_linears(subnet: nn.Sequential) -> List[int]:
+    """Indices (within ``subnet`` children) of the post-ReLU points we can
+    probe as intermediate snapshots.  Each ReLU at child index ``2i+1`` is
+    one observation point; we return the *post-ReLU* child indices.
+    """
+    return [i for i, m in enumerate(subnet) if isinstance(m, nn.ReLU)]
+
+
+def truncate_subnet(subnet: nn.Sequential, end_exclusive: int) -> nn.Sequential:
+    """Return the first ``end_exclusive`` children of ``subnet`` as a new
+    Sequential.  Useful for inspecting intermediate activations."""
+    return nn.Sequential(*list(subnet)[:end_exclusive])
+
+
+def find_round_function(
+    subnet: nn.Sequential,
+    *,
+    max_arity: int = 3,
+    min_cluster_size: int = 8,
+    num_probes: int = 4,
+    snapshot_indices: Optional[Sequence[int]] = None,
+) -> Dict:
+    """Try to identify the round function (F/G/H/I) computed inside one
+    iteration's subnet.
+
+    Strategy: at each candidate intermediate snapshot, decode each hidden
+    neuron's truth table over up to ``max_arity`` inputs.  Cluster neurons
+    by ``table_id``; the largest cluster whose ``table_id`` matches a
+    named 3-input function in :data:`NAMED_3` is reported as the
+    iteration's round function.
+
+    If no 3-input cluster matches a known round function, the function
+    *also* reports 2-input building-block evidence (e.g. ``~a AND b``,
+    ``a AND ~b``, ``a XOR b``) that appears persistently across snapshots
+    -- the AND-NOT pair is the signature of MD5's F and G round
+    functions, and XOR is the signature of MD5's H.
+
+    Returns a dict with ``round_name``, ``cluster_size``, ``table_id``,
+    ``snapshot_child_idx``, per-snapshot cluster statistics, and a
+    ``building_blocks`` summary listing recurring 2-input boolean patterns.
+    """
+    in_dim = find_iteration_input_dim(subnet)
+    relu_children = list_intermediate_linears(subnet)
+    if snapshot_indices is None:
+        n = len(relu_children)
+        if n == 0:
+            return {"round_name": "unknown", "reason": "no ReLU snapshots"}
+        candidates = relu_children[max(0, n // 3):]
+        if len(candidates) > 4:
+            step = len(candidates) // 4
+            snapshot_indices = candidates[::step][:4]
+        else:
+            snapshot_indices = candidates
+
+    best: Dict = {"round_name": "unknown", "cluster_size": 0}
+    snapshot_stats = []
+    # Track 2-input clusters across snapshots for the "building blocks" pass.
+    bblock_max: Dict[str, int] = {}
+
+    for snap_child in snapshot_indices:
+        sub = truncate_subnet(subnet, snap_child + 1)
+        with torch.no_grad():
+            test_x = torch.zeros(in_dim)
+            test_out = sub(test_x)
+        out_dim = test_out.shape[0]
+
+        # Probe a wide channel range to find non-passthrough computations.
+        sample_idxs = list(range(0, out_dim, max(1, out_dim // 128)))
+        rep = decode_iteration(
+            sub, iteration_index=-1,
+            output_indices=sample_idxs,
+            max_arity=max_arity,
+            num_probes=num_probes,
+        )
+
+        from collections import Counter
+        cluster_counts: Counter = Counter()
+        for bf in rep.bit_functions:
+            if bf.table is None or bf.table_id is None:
+                continue
+            cluster_counts[(len(bf.deps), bf.table_id)] += 1
+
+        snap_top = []
+        for (k, tid), count in cluster_counts.most_common(8):
+            if k == 3:
+                name = NAMED_3.get(tid, "unknown")
+            elif k == 2:
+                name = NAMED_2.get(tid, "unknown")
+            else:
+                name = "unknown"
+            snap_top.append({
+                "arity": k, "table_id": tid, "count": count, "name": name,
+            })
+            # 3-input named round-function clusters.
+            if (
+                k == 3
+                and count >= min_cluster_size
+                and "MD5 round" in name
+                and count > best["cluster_size"]
+            ):
+                best = {
+                    "round_name": name,
+                    "cluster_size": count,
+                    "table_id": tid,
+                    "arity": 3,
+                    "snapshot_child_idx": snap_child,
+                }
+            # 2-input AND-NOT / XOR clusters are MD5 building-block evidence.
+            if k == 2 and name in {"~a AND b", "a AND ~b", "a XOR b"}:
+                bblock_max[name] = max(bblock_max.get(name, 0), count)
+        snapshot_stats.append({
+            "snapshot_child_idx": snap_child,
+            "out_dim": out_dim,
+            "top_clusters": snap_top,
+        })
+
+    best["snapshot_stats"] = snapshot_stats
+    best["building_blocks"] = dict(bblock_max)
+
+    # If we didn't find a 3-input named cluster, but we found strong 2-input
+    # building blocks consistent with MD5 round structure, report them as
+    # evidence.
+    if best["round_name"] == "unknown" and bblock_max:
+        anb = bblock_max.get("~a AND b", 0)
+        anb2 = bblock_max.get("a AND ~b", 0)
+        xor = bblock_max.get("a XOR b", 0)
+        if anb >= min_cluster_size and anb2 >= min_cluster_size:
+            best["round_name"] = (
+                f"partial: {anb}x ~a AND b + {anb2}x a AND ~b "
+                "(building blocks of MD5 F/G)"
+            )
+        elif anb >= min_cluster_size:
+            best["round_name"] = (
+                f"partial: {anb}x ~a AND b "
+                "(half of MD5 F = (B AND C) OR (~B AND D))"
+            )
+        elif xor >= min_cluster_size:
+            best["round_name"] = (
+                f"partial: {xor}x a XOR b "
+                "(building block of MD5 H = B XOR C XOR D)"
+            )
+    return best
+
+
 def decode_iteration(
     subnet: nn.Sequential,
     iteration_index: int,

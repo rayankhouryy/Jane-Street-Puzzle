@@ -619,7 +619,8 @@ confirms `model("bitter lesson") = 1`.
 | MVP-5 | Codegen — emit recovered Python program | ✅ `scripts/run_emit.py` |
 | MVP-7.6 | Motif-aware certification beyond AND (XOR, OR, delta) | ⏳ |
 | MVP-9a | Per-output-bit truth-table decoder | ✅ `scripts/run_round_decode.py` |
-| MVP-9 | Full F/G/H/I + modular-add round decode | ⏳ |
+| MVP-9b | Round-function building-block detection (per iteration) | ✅ `scripts/run_round_classify.py` |
+| MVP-9c | Full F/G/H/I 3-input function identification | ⏳ |
 | MVP-8 | Per-iteration K constants (as residuals after MVP-9) | ⏳ |
 | MVP-10 | Padding scheme decode | ⏳ |
 
@@ -683,6 +684,9 @@ python scripts/run_certify.py model_3_11.pt
 # for the parts we haven't decompiled yet
 python scripts/run_emit.py model_3_11.pt
 # -> writes artifacts/recovered_program.py
+
+# Round decoder (MVP-9a) -- per-output-bit truth-table extraction
+python scripts/run_round_decode.py model_3_11.pt --iteration 20
 ```
 
 ---
@@ -752,9 +756,52 @@ python scripts/run_emit.py model_3_11.pt
   (from the head's IV stamping).  Candidates: position-41 shape-368
   bias deltas (16 iterations of 32-bit constants observed
   exploratorily), or symbolic propagation through the body.
-- [ ] **MVP-9.** Decode the F/G/H/I non-linear round functions of one
-  body iteration into Python via motif-driven simplification of the
-  abstract-interpretation output.
+- [x] **MVP-9a — per-output-bit truth-table decoder.** Isolate one body
+  iteration as a sub-Sequential; for each output bit, find its dependency
+  set by probing, then enumerate its truth table.  Classify against a
+  catalog of 1/2/3-input boolean functions (including MD5's F, G, H, I).
+  Multi-valued outputs (adder bit-slices) are reported as integer
+  signatures.  Running on the benchmark model, iteration 20 of 63
+  yields:
+
+  ```
+  Named function classes recovered:
+    24  a AND ~b               (MD5 F/G building block)
+    18  ~a AND b               (MD5 F/G building block)
+     4  int_table[k=3,         (2-bit modular-adder
+        values=(0,1,0,0,2,3,    bit-slice fragment)
+                0,1)]
+     4  int_table[k=1,
+        values=(128, 127)]     (sign-flip / NOT gadget)
+   186  passthroughs (1-input identity)
+    40  constants
+  ```
+
+  along with 64 high-arity outputs (8-23 deps) that are the round's
+  register-update bits with carry chains.
+- [x] **MVP-9b — round-function building-block detection.** Run the
+  iteration decoder at multiple intermediate snapshots and cluster the
+  hidden neurons' truth tables.  Persistent 2-input AND-NOT clusters
+  are reported as **partial evidence** of MD5-style F/G/I round
+  functions; persistent XOR clusters indicate H rounds.
+
+  On the benchmark model, the count of ``~a AND b`` clusters per
+  iteration distinguishes round-function families:
+
+  | iterations | ``~a AND b`` count | MD5 round class signature |
+  |---|---|---|
+  | 0-24 (F) | 9-10 | F uses ``(B AND C) OR (~B AND D)`` (AND-NOT heavy) |
+  | 32, 40 (H) | 6 | H uses ``B XOR C XOR D`` (no AND-NOT) |
+  | 48-62 (I) | 10 | I uses ``C XOR (B OR ~D)`` (NOT-heavy) |
+
+  This empirically distinguishes the iteration's round-function family
+  without any algorithm knowledge.  Full 3-input function naming
+  (clean F/G/H/I attribution per output bit) is the next milestone.
+- [ ] **MVP-9c.** Probe the *register-update* output bits (which have
+  high arity due to carry chains) by *holding the modular adder inputs
+  fixed* (e.g. zeroing K, M, A) and re-extracting the truth table.  The
+  resulting bit should reveal the pure 3-input round function on
+  (B_i, C_i, D_i) without the adder confound.
 - [ ] **MVP-10.** Decode the head's padding scheme: input length
   counting, the ``0x80`` framing byte, and the length suffix.
 - [x] **MVP-7.5 — relational + motif-aware certification.** Record each
