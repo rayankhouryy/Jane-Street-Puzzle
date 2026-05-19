@@ -538,6 +538,69 @@ PyTorch Sequential
 
 ## 9. Status
 
+### Headline claim (precise)
+
+NeuroDecomp has independently recovered a strong cryptographic fingerprint
+from the model weights — purely from structural analysis, with no
+algorithm-specific code:
+
+* the ASCII/null-padded tokenizer (recovered from the pickled `_call_impl`),
+* a **16-byte equality comparator** with the exact target
+  `c7ef65233c40aa32c2b9ace37595fa7c`,
+* four **32-bit initial constants** matching the MD5 IV
+  ``A = 0x67452301, B = 0xefcdab89, C = 0x98badcfe, D = 0x10325476``,
+* the precomputed subexpressions ``B & C = 0x88888888`` and ``~B`` stamped
+  into the head's working state,
+* the first round constant ``K[0] = 0xd76aa478``,
+* a 3-register × 32-bit **rotate gadget** with the per-iteration shift
+  schedule matching MD5's rotation table for the **63 recovered body
+  iterations** (one round absorbed into head/tail/stitching),
+* a **Z3-proven catalog of 6 ReLU motifs** (Kronecker delta, AND, OR, XOR,
+  NOT, threshold), with **58,524 candidate boolean-AND row patterns**
+  located across the network and **12,859 of them (22 %) confirmed as
+  genuine booleans** by domain certification through abstract
+  interpretation.
+
+> **From candidates to confirmed.**
+> The motif scanner identifies the row pattern `ReLU(a + b - 1)`, which
+> is a *true* AND only when both inputs are certified booleans.
+> MVP-7's domain certifier runs abstract interpretation over the network
+> starting from the byte domain `[0, 255]^55`, and checks each candidate
+> against its inputs' certified abstract range.  This drops the count
+> from 58 k → 13 k, and yields a much more honest per-region breakdown:
+>
+> | region | candidates | confirmed | rate |
+> |---|---|---|---|
+> | head | 32 | 32 | 100 % |
+> | body | 56,708 | 12,575 | 22.2 % |
+> | tail | 1,784 | 252 | 14.1 % |
+>
+> The remaining 78 % candidates lose certification because our Affine
+> abstract domain widens its bounds through saturating ReLUs.  Richer
+> domains (e.g. bit-vector tracking of opaque ReLU symbols) are listed
+> as future work in MVP-7.5.
+
+Independent confirmation that the algorithm is MD5 comes from
+[adirk0/Jane-Street-Puzzle](https://github.com/adirk0/Jane-Street-Puzzle);
+we use that as a *validation oracle* only. MD5(`"bitter lesson"`) =
+`c7ef65233c40aa32c2b9ace37595fa7c`, and `scripts/09_verify_md5.py`
+confirms `model("bitter lesson") = 1`.
+
+### What remains open
+
+* per-round constant table $K_i$ for $i \in \{1, \dots, 63\}$ (only $K[0]$
+  recovered so far);
+* iteration 63 / 64 of the body (block finder reports 63; full MD5 has 64
+  rounds, so one round is currently absorbed into head/tail/stitching);
+* symbolic decode of one representative body block as Python (F/G/H/I
+  round functions);
+* loop folding & full codegen (`g(s) = model(s)` for every $s \in \Sigma^{\le 55}$);
+* domain-certified motif recognition (turn the 58k *candidate* AND patterns
+  into *confirmed* boolean ANDs by carrying input domains through the
+  network).
+
+### Pipeline progress table
+
 | Phase | Description | Status |
 |---|---|---|
 | 0 | Baseline scripts (replicating manual analysis) | ✅ `scripts/01–09` |
@@ -547,7 +610,8 @@ PyTorch Sequential
 | MVP-3 | Head Decompiler (abstract interpretation) | ✅ `scripts/run_head.py` |
 | MVP-4 | One-iteration Body Decompiler (rotate gadget) | ✅ `scripts/run_body.py` |
 | MVP-6 | Z3-backed motif library | ✅ `scripts/run_motifs.py` |
-| MVP-5 | Full loop folding & codegen | ⏳ |
+| MVP-7 | Domain-certified motif recognition | ✅ `scripts/run_certify.py` |
+| MVP-5 | Full loop folding & codegen | ⏳ next |
 
 ### What MVP-1 currently reports
 
@@ -559,8 +623,8 @@ weight alphabet : integers in [-1, 30]  (truncated; full alphabet is
 sparsity        : 99.6% of weights are exactly 0
 tokenizer       : ord(str(x)[:55].ljust(55, '\x00'))   (recovered from pickle)
 best period     : 42  (97.05% match)
-head/body/tail  : [0, 18) / [18, 1320) / [1320, 2721)
-iterations      : 31 in longest periodic run
+head/body/tail  : [0, 18) / [18, 2664) / [2664, 2721)
+iterations      : 63 in the recovered body
 weight tying    : 40 of 42 in-block positions bit-identical across iterations
                   (varying positions: 28 and 41)
 output template : AND of 16 predicates of shape (a + c == 2b - 1) on integers
@@ -570,11 +634,6 @@ The output template tells us, without naming the algorithm: the model is a
 boolean **AND of 16 integer-equality predicates**. The body is a
 weight-tied recurrent computation with two per-iteration deltas. That's a
 lot of information about the algorithm, recovered purely from weights.
-
-(`MVP-1` currently sees 31 of the 63 body iterations — the period
-detector's longest-run heuristic stops at the first stitching layer.
-Merging across stitching layers will recover all 63; that's a small
-follow-up.)
 
 ---
 
@@ -604,6 +663,10 @@ python scripts/run_body.py model_3_11.pt
 
 # Motif library scan (MVP-6) -- Z3-verified motif catalog + pattern matcher
 python scripts/run_motifs.py model_3_11.pt
+
+# Domain-certified motif scan (MVP-7) -- confirms which candidates are
+# genuine boolean gates by carrying input domains through the network
+python scripts/run_certify.py model_3_11.pt
 ```
 
 ---
@@ -642,13 +705,36 @@ python scripts/run_motifs.py model_3_11.pt
   s[48..62]  = [6, 10, 15, 21] x ~4
   ```
 
-  matching MD5's rotation table for all 63 recovered iterations.
+  matching MD5's rotation table for the **63 recovered body iterations**.
+  (Iteration 63 — i.e. round 64 in MD5 — is currently absorbed into the
+  head/tail/stitching layers; reuniting it is a follow-up.)
 - [x] Build a Z3-verified motif catalog covering the
   Kronecker $\delta$, boolean AND/OR/XOR/NOT, and threshold gadgets;
   every motif is proved equivalent to its reference on import.  Scan
   the model for instances.  → `scripts/run_motifs.py` finds **58,524
-  `bool_and`-pattern rows** across the network: 32 in the head, ~900
-  per body iteration, 1,784 in the tail.
+  `bool_and`-pattern rows** (32 in the head, ~900 per body iteration,
+  1,784 in the tail).
+- [x] **Domain-certify the motif candidates.** Run abstract
+  interpretation over the model from the byte input domain and check
+  each candidate AND against its inputs' certified domain.  →
+  `scripts/run_certify.py` confirms **12,859 of 58,524** candidates
+  (22 %): all 32 in the head, 12,575 of 56,708 in the body (~200
+  per iteration -- consistent with MD5's per-round F/G/H/I + modular
+  adders), 252 of 1,784 in the tail.
+- [ ] Recover the per-iteration constant table $K_i$ for
+  $i \in \{1, \dots, 63\}$.  Only $K[0]$ has been recovered so far
+  (from the head's IV stamping).  Candidates: position-41 shape-368
+  bias deltas (16 iterations of 32-bit constants observed
+  exploratorily), or symbolic propagation through the body.
+- [ ] Decode the F/G/H/I non-linear round functions of one body
+  iteration into Python via motif-driven simplification of the
+  abstract-interpretation output.
+- [ ] Glue all stages; emit a single Python program $g$ such that
+  $g(s) = \mathrm{model}(s)$ for every $s \in \Sigma^{\le 55}$.
+- [ ] Identify the algorithm: compare $g$ against known
+  16-byte-output 128-bit compression functions.  (External validation
+  oracle [`docs/99_spoilers.md`](docs/99_spoilers.md) confirms MD5;
+  we use it only to check the decompiler's output.)
 - [ ] Decode one representative body block $B$. Express it as a Python
   function $B(\text{state}, K_t, s_t) \to \text{state}$ where $K_t, s_t$
   are the per-iteration constants extracted from position 28 (and other

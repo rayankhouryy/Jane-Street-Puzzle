@@ -30,10 +30,12 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from . import (
-    block_finder, body, head, interp, model_loader, motifs, sparse_graph, tail,
+    block_finder, body, certify, head, interp, model_loader, motifs,
+    sparse_graph, tail,
 )
 from .block_finder import find_blocks
 from .body import decompile_body
+from .certify import certify_motifs
 from .head import decompile_head
 from .model_loader import load_model, recover_tokenizer
 from .motifs import scan_model as scan_motifs, verify_all as verify_motifs
@@ -50,8 +52,10 @@ __all__ = [
     "decompile_body",
     "scan_motifs",
     "verify_motifs",
+    "certify_motifs",
     "block_finder",
     "body",
+    "certify",
     "head",
     "interp",
     "model_loader",
