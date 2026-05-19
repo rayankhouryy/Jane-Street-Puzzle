@@ -592,6 +592,9 @@ python -m unittest discover tests
 
 # Profile (MVP-1)
 python scripts/run_profile.py model_3_11.pt
+
+# Tail decompilation (MVP-2) -- recovers the 16-byte target value
+python scripts/run_tail.py model_3_11.pt
 ```
 
 ---
@@ -603,9 +606,11 @@ python scripts/run_profile.py model_3_11.pt
 - [x] SVD the head; recover the standard-basis byte encoding.
 - [x] Decode the final Linear $L_{2721}$ analytically.
 - [x] Identify the input tokenizer (ASCII bytes, length 55, null pad).
-- [ ] Decode the penultimate Linear $L_{2720}$ symbolically: which
+- [x] Decode the penultimate Linear $L_{2720}$ symbolically: which
   16 bytes does it extract, from where in the 288-bit state, with which
-  binary-to-integer mapping?
+  binary-to-integer mapping?  → `scripts/run_tail.py` recovers the
+  16-byte target ``c7ef65233c40aa32c2b9ace37595fa7c`` and the bit-address
+  vector for each byte.
 - [ ] Decode one representative body block $B$. Express it as a Python
   function $B(\text{state}, K_t, s_t) \to \text{state}$ where $K_t, s_t$
   are the per-iteration constants extracted from position 28 (and other
