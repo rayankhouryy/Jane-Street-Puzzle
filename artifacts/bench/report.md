@@ -7,11 +7,11 @@ Equivalence column: ✅ if model(x) == oracle(x) on the tested input set (exhaus
 | and1 | 2 | 1 | 2 | 5 | ✅ | bool_and:1 | bool_and:1 | bool_and:1 | 1 | 0 | 0 |
 | not1 | 1 | 1 | 2 | 4 | ✅ | - | - | - | 0 | 0 | 0 |
 | or1 | 2 | 1 | 3 | 15 | ✅ | bool_and:1 | bool_and:1 | bool_and:1 | 1 | 0 | 0 |
-| xor1 | 2 | 1 | 3 | 15 | ✅ | bool_and:1, bool_xor:1 | bool_and:1, bool_xor:1 | bool_and:1 | 2 | 0 | 0 |
+| xor1 | 2 | 1 | 3 | 15 | ✅ | bool_and:1, bool_xor:1 | bool_and:1, bool_xor:1 | bool_and:1, bool_xor:1 | 2 | 0 | 0 |
 | mux1 | 3 | 1 | 5 | 41 | ✅ | bool_and:3 | bool_and:3 | bool_and:3 | 3 | 0 | 0 |
 | and8 | 16 | 8 | 2 | 208 | ✅ | bool_and:8 | bool_and:8 | bool_and:8 | 8 | 0 | 0 |
 | or8 | 16 | 8 | 3 | 680 | ✅ | bool_and:8 | bool_and:8 | bool_and:8 | 8 | 0 | 0 |
-| xor8 | 16 | 8 | 3 | 680 | ✅ | bool_and:8, bool_xor:8 | bool_and:8, bool_xor:8 | bool_and:8 | 16 | 0 | 0 |
+| xor8 | 16 | 8 | 3 | 680 | ✅ | bool_and:8, bool_xor:8 | bool_and:8, bool_xor:8 | bool_and:8, bool_xor:8 | 16 | 0 | 0 |
 
 ## Per-kind precision / recall (syntactic scanner)
 

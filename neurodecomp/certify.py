@@ -295,16 +295,35 @@ def certify_motifs(
     while True:
         confirmed_hits = []
         for h in hits:
-            inputs = _values_seen_by_linear(snapshots, h.layer_idx)
-            if inputs is None:
-                continue
             if h.motif_name == "bool_and":
+                inputs = _values_seen_by_linear(snapshots, h.layer_idx)
+                if inputs is None:
+                    continue
                 in0, in1 = h.input_neurons
                 a0, a1 = inputs[in0], inputs[in1]
                 # Reject degenerate ANDs: one input is the constant 0 or 1
                 # (i.e. a dead-neuron pad or a structural constant).  These
                 # are syntactically AND-shaped rows but collapse to a unary
                 # threshold step.
+                if a0.is_const or a1.is_const:
+                    continue
+                if _certify_extended(a0) and _certify_extended(a1):
+                    confirmed_hits.append(h)
+            elif h.motif_name == "bool_xor":
+                # XOR pattern  out = a + b - 2 * AND(a, b)  is split across
+                # two linears: the AND lives in linears[h.layer_idx - 1] and
+                # the XOR row in linears[h.layer_idx].  ``input_neurons`` are
+                # ``(src0, src1)`` — indices into the input vector of the
+                # *upstream* Linear (i.e. the booleans ``a`` and ``b``).
+                if h.layer_idx == 0:
+                    continue
+                up_inputs = _values_seen_by_linear(snapshots, h.layer_idx - 1)
+                if up_inputs is None:
+                    continue
+                in0, in1 = h.input_neurons
+                if in0 >= len(up_inputs) or in1 >= len(up_inputs):
+                    continue
+                a0, a1 = up_inputs[in0], up_inputs[in1]
                 if a0.is_const or a1.is_const:
                     continue
                 if _certify_extended(a0) and _certify_extended(a1):
